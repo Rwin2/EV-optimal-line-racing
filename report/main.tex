@@ -62,14 +62,14 @@ The battery state evolves as $\dot{SOC} = -{P_{\text{elec}}}/{(Q_{\text{batt}} \
 \subsection*{Optimization Formulation}
 \vspace{-0.05in}
 
-For the \textbf{speed and control stage}, given a candidate path, we will minimize the weighted cost
+For the \textbf{path optimization stage}, we will parameterize the racing line by lateral offsets $\boldsymbol{\alpha} = [\alpha_1, \dots, \alpha_N]$ from the track centerline at $N$ stations, so that each path point is $\mathbf{p}_i = \mathbf{c}_i + \alpha_i \, \hat{\mathbf{n}}_i$ with $\mathbf{c}_i$ the centerline position and $\hat{\mathbf{n}}_i$ the outward normal. The constraint $|\alpha_i| \leq w_i/2$ keeps the path within the track of half-width $w_i$. For the \textbf{speed and control stage}, given a candidate path, we will minimize
 \vspace{-0.05in}
 \[
-J = \underbrace{w_t \int_0^{T} 1\, dt}_{\text{time}} + \underbrace{w_e \cdot \Delta SOC}_{\text{energy}} + \underbrace{w_u \int_0^{T} \|\dot{\mathbf{u}}\|^2 \, dt}_{\text{smoothness}}
+J(\boldsymbol{\alpha}, \mathbf{u}) = \underbrace{w_t \int_0^{T} 1\, dt}_{\text{time}} + \underbrace{w_e \cdot \Delta SOC}_{\text{energy}} + \underbrace{w_u \int_0^{T} \|\dot{\mathbf{u}}\|^2 \, dt}_{\text{smoothness}}
 \]
 
 \vspace{-0.1in}
-\noindent subject to speed bounds $\|\mathbf{v}\| \leq v_{\max}$, actuation limits $|F_{\text{drive}}| \leq F_{\max}$ and $|\delta| \leq \delta_{\max}$, battery limits $SOC_{\min} \leq SOC \leq 1$, tire grip $F_x^2 + F_y^2 \leq (\mu m g)^2$, and track boundary constraints. For the \textbf{path stage}, we will optimize over feasible racing lines within the track boundaries to minimize $J$. Varying $w_t$ and $w_e$ will let us explore the Pareto front between time and energy.
+\noindent subject to $\|\mathbf{v}\| \leq v_{\max}$, $|F_{\text{drive}}| \leq F_{\max}$, $|\delta| \leq \delta_{\max}$, $SOC_{\min} \leq SOC \leq 1$, $F_x^2 + F_y^2 \leq (\mu m g)^2$, and $|\alpha_i| \leq w_i/2$. Since the two stages are coupled, we will iterate between them or solve jointly. Varying $w_t$ and $w_e$ will let us trace the Pareto front between lap time and energy.
 
 \vspace{-0.05in}
 \subsection*{Experimental Setup}
