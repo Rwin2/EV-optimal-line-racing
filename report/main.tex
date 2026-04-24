@@ -75,23 +75,21 @@ J = \underbrace{w_t \cdot T_{\text{lap}}}_{\text{time}} + \underbrace{w_e \cdot 
 \subsection*{Experimental Setup}
 \vspace{-0.05in}
 
-\begin{wrapfigure}{r}{0.42\textwidth}
+\begin{wrapfigure}{r}{0.38\textwidth}
     \vspace{-0.2in}
     \centering
-    \includegraphics[width=0.40\textwidth]{../figures/track_with_raceline.png}
+    \includegraphics[width=0.36\textwidth]{../figures/track_with_raceline.png}
     \vspace{-0.1in}
     \caption{Simulated circuit with track boundaries and center-line.}
     \label{fig:track_example}
     \vspace{-0.15in}
 \end{wrapfigure}
 
-We plan to test the controller on several simulated closed circuits of varying complexity (from simple ovals to circuits with tight hairpins and chicanes), as shown in \cref{fig:track_example}.
+We plan to test the controller on several simulated closed circuits of varying complexity, from simple ovals to tracks with tight hairpins and chicanes, as shown in \cref{fig:track_example}.
 
-\textbf{Baselines.}
-We will benchmark against: (1)~constant-speed center-line following, (2)~minimum-time aggressive driving (ignoring energy), (3)~minimum-curvature path planning \citep{Heilmeier2020}, and (4)~a heuristic energy-saving strategy.
+\textbf{Baselines.} We will benchmark our MPC controller against four baselines, namely constant-speed center-line following, aggressive minimum-time driving that ignores energy, minimum-curvature path planning \citep{Heilmeier2020}, and a heuristic energy-saving strategy.
 
-\textbf{Metrics.}
-Performance will be evaluated on: lap time $T_{\text{lap}}$, energy consumed $\Delta SOC$, ride smoothness $\int \|\dot{\mathbf{u}}\|^2 dt$, and solver runtime. We will also construct Pareto fronts between lap time and energy use.
+\textbf{Metrics.} We will evaluate each approach on lap time $T_{\text{lap}}$, energy consumed $\Delta SOC$, ride smoothness $\int \|\dot{\mathbf{u}}\|^2 dt$, and solver runtime. We will also construct Pareto fronts between lap time and energy use to characterize the tradeoff.
 
 \enlargethispage{0.3in}
 \vspace{-0.15in}
