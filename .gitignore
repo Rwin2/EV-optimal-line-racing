@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# LaTeX build artifacts
+report/*.aux
+report/*.bbl
+report/*.blg
+report/*.log
+report/*.out
+report/*.toc
+report/*.synctex.gz
+report/*.fdb_latexmk
+report/*.fls
+report/*.nav
+report/*.snm
+report/*.vrb
+
+# Project notes (untracked reflexion notes)
+NOTES.md
+
+# Race outputs (untracked, timestamped runs)
+races/
+
+# Large reference files
+references/AA222_Course_Reader.pdf
+
+# Data and output
+output/
