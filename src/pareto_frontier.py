@@ -24,9 +24,13 @@ def main():
     print(f"  {trk.name} | {len(trk.centerline)} points | {trk.length:.0f} m")
     
     # Create optimizer
-    print("\n[2/3] Computing Pareto frontier (15 points)...")
+    print("\n[2/3] Computing Pareto frontier (10 points / safer weight range)...")
     opt = SpeedProfileOptimizer(trk.centerline, a_max=4.0, a_brake=8.0, n_points=40)
-    frontier = opt.compute_pareto_frontier(n_points=15)
+    frontier = opt.compute_pareto_frontier(
+        n_points=10,
+        w_energy_min=1e-4,
+        w_energy_max=1e-1,
+    )
     
     # Print results table
     print("\n[3/3] Pareto Frontier Results:")
@@ -72,7 +76,7 @@ def main():
     
     fig.tight_layout()
     
-    # Save figure
+    # Save Pareto figure
     proj_root = os.path.dirname(os.path.dirname(__file__))
     fig_dir = os.path.join(proj_root, 'figures')
     os.makedirs(fig_dir, exist_ok=True)
@@ -81,7 +85,33 @@ def main():
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"\n✓ Saved: {output_path}")
     plt.close(fig)
-    
+
+    # Compare with a baseline speed profile
+    baseline = opt.baseline_speed_profile()
+    fastest = frontier['profiles'][0]
+    efficient = frontier['profiles'][-1]
+
+    baseline_metrics = opt.compute_metrics(baseline)
+    fastest_metrics = opt.compute_metrics(fastest)
+    efficient_metrics = opt.compute_metrics(efficient)
+
+    fig2, ax = plt.subplots(figsize=(12, 5), facecolor='white')
+    x = np.arange(len(baseline))
+    ax.plot(x, baseline, label='Baseline curvature-limited', color='#888888', linewidth=2)
+    ax.plot(x, fastest, label=f'Pareto min time ({fastest_metrics["lap_time_s"]:.1f}s)', color='#d62728', linewidth=2)
+    ax.plot(x, efficient, label=f'Pareto min energy ({efficient_metrics["energy_J"]:.0f}J)', color='#1f77b4', linewidth=2)
+    ax.set_xlabel('Track segment index', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Speed (m/s)', fontsize=12, fontweight='bold')
+    ax.set_title('Speed Profile Comparison: Baseline vs Pareto Optima', fontsize=13, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.legend(fontsize=10, loc='best')
+    fig2.tight_layout()
+
+    output_path2 = os.path.join(fig_dir, 'pareto_speed_profiles.png')
+    fig2.savefig(output_path2, dpi=150, bbox_inches='tight')
+    print(f"✓ Saved: {output_path2}")
+    plt.close(fig2)
+
     # Summary
     print(f"\n  Summary:")
     print(f"    Time range: {frontier['lap_time'][0]:.1f}s — {frontier['lap_time'][-1]:.1f}s")
