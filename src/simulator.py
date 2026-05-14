@@ -67,7 +67,7 @@ def draw_track(ax, track: Track, show_racing_lines=None):
 
     # Grass background
     ax.add_patch(patches.Rectangle(
-        (cx.min()-pad, cy.min()-pad), cx.ptp()+2*pad, cy.ptp()+2*pad,
+        (cx.min()-pad, cy.min()-pad), np.ptp(cx)+2*pad, np.ptp(cy)+2*pad,
         facecolor=GRASS, zorder=0))
 
     # Grass texture
