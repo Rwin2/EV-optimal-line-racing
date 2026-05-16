@@ -132,26 +132,8 @@ def generate_racing_line(track, mode="center"):
     if mode == "center":
         return track.centerline.copy()
     elif mode == "minimum_curvature":
-        # Simple heuristic: move toward outer boundary before corners,
-        # clip apex on inside of corners
-        curvature = track.get_curvature()
-        n = len(track.centerline)
-        racing_line = track.centerline.copy()
-
-        # Lookahead curvature
-        window = 20
-        for i in range(n):
-            # Average future curvature
-            future_curv = np.mean([curvature[(i+j) % n] for j in range(window)])
-            # Offset toward inside of turn (negative curvature = turn right)
-            offset = -np.sign(future_curv) * min(abs(future_curv) * 3000, track.widths[i] * 0.7)
-            racing_line[i] = track.centerline[i] + offset * track.normals[i]
-
-        # Smooth the result
-        from scipy.ndimage import uniform_filter1d
-        racing_line[:, 0] = uniform_filter1d(racing_line[:, 0], size=15, mode='wrap')
-        racing_line[:, 1] = uniform_filter1d(racing_line[:, 1], size=15, mode='wrap')
-
-        return racing_line
+        from optimizer import optimize_racing_line
+        results = optimize_racing_line(track, n_stations=150, solver='custom')
+        return results['raceline_custom']
     else:
         return track.centerline.copy()
