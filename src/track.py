@@ -243,6 +243,18 @@ def generate_monaco_style(n_points=800, track_width=18):
     return Track(centerline, left, right, widths, normals, s, total_len, "Sharp Corner Circuit")
 
 
+def generate_circle(n_points=500, radius=100, track_width=15):
+    """Generate a perfect circular track. Used for theoretical bound validation:
+    on a circle of radius R with half-width w, the exact optimal racing line
+    is the inner boundary at radius R - w, giving kappa = 1/(R - w)."""
+    t = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+    x = radius * np.cos(t)
+    y = radius * np.sin(t)
+    centerline = np.column_stack([x, y])
+    left, right, widths, normals, s, total_len = _compute_track_geometry(centerline, track_width)
+    return Track(centerline, left, right, widths, normals, s, total_len, "Circular Track")
+
+
 def generate_monza_style(n_points=600, track_width=11):
     """Generate a Monza-inspired circuit: long straights with tight chicanes."""
     control_points = np.array([
@@ -276,6 +288,7 @@ def generate_monza_style(n_points=600, track_width=11):
 # Registry of available tracks
 TRACK_GENERATORS = {
     "oval": generate_oval,
+    "circle": generate_circle,
     "figure_eight": generate_figure_eight,
     "complex": generate_complex_circuit,
     "hairpin": generate_hairpin_chicane,

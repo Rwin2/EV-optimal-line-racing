@@ -28,11 +28,28 @@ def alpha_to_raceline(alpha, centerline, normals):
 
 
 def compute_curvature_from_path(path):
-    """Compute curvature at each point of a closed 2D path (periodic)."""
-    dx = np.gradient(path[:, 0], edge_order=2)
-    dy = np.gradient(path[:, 1], edge_order=2)
+    """Compute curvature at each point of a closed 2D path (periodic).
+
+    Uses periodic finite differences to avoid boundary artifacts
+    that np.gradient introduces on non-periodic data.
+    """
+    n = len(path)
+    # Pad with wraparound for periodic central differences
+    pad = 3
+    x = np.concatenate([path[-pad:, 0], path[:, 0], path[:pad, 0]])
+    y = np.concatenate([path[-pad:, 1], path[:, 1], path[:pad, 1]])
+
+    dx = np.gradient(x, edge_order=2)
+    dy = np.gradient(y, edge_order=2)
     ddx = np.gradient(dx, edge_order=2)
     ddy = np.gradient(dy, edge_order=2)
+
+    # Trim padding
+    dx = dx[pad:pad+n]
+    dy = dy[pad:pad+n]
+    ddx = ddx[pad:pad+n]
+    ddy = ddy[pad:pad+n]
+
     speed = np.sqrt(dx**2 + dy**2)
     speed = np.maximum(speed, 1e-10)
     kappa = (dx * ddy - dy * ddx) / speed**3
@@ -65,27 +82,23 @@ def gradient(alpha, centerline, normals, eps=1e-5):
 
 # ── Projected Adam (Alg 5.8 with bound projection) ──────────────────────
 
-def projected_adam(f, grad_f, x0, lb, ub, max_iter=1500, lr=0.5,
-                   b1=0.9, b2=0.999, tol=1e-10):
+def projected_adam(f, grad_f, x0, lb, ub, max_iter=3000, lr=0.5,
+                   b1=0.9, b2=0.999, tol=1e-12):
     """
-    Adam optimizer (Alg 5.8) with projection onto box [lb, ub].
-    Uses cosine annealing learning rate schedule for stable convergence.
-
-    Much more robust than BFGS for noisy finite-difference gradients
-    in high dimensions with bound constraints.
+    Vanilla Adam optimizer (Alg 5.8) with projection onto box [lb, ub].
+    Cosine annealing learning rate schedule.
+    No budget constraints — runs until convergence or max_iter.
     """
     x = np.clip(x0.copy(), lb, ub)
     ea = 1e-8
     mv = np.zeros_like(x)
     ms = np.zeros_like(x)
-    f_best = f(x)
-    x_best = x.copy()
-    history = [(0, f_best)]
+    history = [(0, f(x))]
 
     for t in range(1, max_iter + 1):
         g = grad_f(x)
 
-        # Adam moment updates
+        # Adam moment updates (Alg 5.8)
         mv = b1 * mv + (1 - b1) * g
         ms = b2 * ms + (1 - b2) * g**2
         m_hat = mv / (1 - b1**t)
@@ -99,20 +112,18 @@ def projected_adam(f, grad_f, x0, lb, ub, max_iter=1500, lr=0.5,
         x -= lr_t * m_hat / (np.sqrt(v_hat) + ea)
         x = np.clip(x, lb, ub)
 
-        if t % 10 == 0:
+        # log every 50 iters (cheap — just one f eval)
+        if t % 50 == 0:
             fval = f(x)
-            if fval < f_best:
-                f_best = fval
-                x_best = x.copy()
             history.append((t, fval))
 
-            # convergence check
-            if t > 100 and len(history) > 20:
-                recent = [h[1] for h in history[-20:]]
+            # convergence check on recent window
+            if len(history) > 10:
+                recent = [h[1] for h in history[-10:]]
                 if max(recent) - min(recent) < tol:
                     break
 
-    return x_best, history
+    return x, history
 
 
 # ── Projected BFGS (Alg 6.6 with bound projection) ──────────────────────
@@ -302,7 +313,7 @@ def solve_scipy(centerline, normals, widths, alpha0=None):
 
     result = scipy_minimize(f, alpha0, jac=g, method='SLSQP',
                             bounds=bounds,
-                            options={'maxiter': 1000, 'ftol': 1e-9, 'disp': False})
+                            options={'maxiter': 2000, 'ftol': 1e-12, 'disp': False})
     return result.x, result
 
 
@@ -326,13 +337,13 @@ def solve_custom(centerline, normals, widths, alpha0=None):
     def g(alpha):
         return gradient(alpha, centerline, normals)
 
-    # Phase 1: Adam for robust initial convergence
+    # Phase 1: Vanilla Adam — run until convergence, no budget limit
     alpha_adam, hist_adam = projected_adam(f, g, alpha0, lb, ub,
-                                          max_iter=1500, lr=0.5)
+                                          max_iter=3000, lr=0.5)
 
     # Phase 2: BFGS refinement from Adam solution
     alpha_opt, hist_bfgs = projected_bfgs(f, g, alpha_adam, lb, ub,
-                                           max_iter=300, tol=1e-9)
+                                           max_iter=500, tol=1e-10)
 
     # merge histories
     offset = hist_adam[-1][0] if hist_adam else 0
@@ -534,7 +545,9 @@ def optimize_racing_line(track, n_stations=200, solver='both'):
         alpha_full = interp1d(t_sub, alpha_sub, kind='cubic',
                               fill_value='extrapolate')(t_full)
         alpha_full = np.clip(alpha_full, -track.widths / 2, track.widths / 2)
-        alpha_full = uniform_filter1d(alpha_full, size=5, mode='wrap')
+        # smooth proportional to upsampling ratio to avoid interpolation artifacts
+        smooth_size = max(3, n_full // n_stations)
+        alpha_full = uniform_filter1d(alpha_full, size=smooth_size, mode='wrap')
 
         raceline = alpha_to_raceline(alpha_full, track.centerline, track.normals)
         kappa = compute_curvature_from_path(raceline)
@@ -950,6 +963,297 @@ def plot_multi_track_summary(all_tracks, all_results, output_path=None):
     plt.close(fig)
 
 
+def curvature_comparison(track, results, n_stations=200, output_path=None):
+    """
+    Compare cumulated curvature: centerline vs optimized lines.
+
+    Uses the subsampled resolution (n_stations) where the optimization
+    was actually performed, to avoid interpolation artifacts.
+    """
+    import matplotlib.pyplot as plt
+
+    # subsample to optimization resolution
+    n_full = len(track.centerline)
+    idx = np.linspace(0, n_full - 1, n_stations, dtype=int)
+    cl = track.centerline[idx]
+    normals = track.normals[idx]
+    widths = track.widths[idx]
+    n = n_stations
+    s_norm = np.linspace(0, 100, n)
+
+    # centerline curvature at this resolution
+    kappa_c = compute_curvature_from_path(cl)
+
+    cum_center = np.cumsum(kappa_c**2)
+    total_center = cum_center[-1]
+
+    lines_kappa = [
+        ('Centerline', kappa_c, '#ffdd00', '-', 2.5),
+    ]
+    lines_cum = [
+        ('Centerline', cum_center, '#ffdd00', '-', 2.5),
+    ]
+
+    totals = {
+        'Centerline': total_center,
+    }
+
+    # numerical solutions at subsampled resolution
+    for alpha_key, label, color, ls in [
+        ('alpha_custom', 'Custom (Adam+BFGS)', '#ff3333', '-'),
+        ('alpha_scipy', 'Scipy (SLSQP)', '#33ccff', '--')
+    ]:
+        if alpha_key not in results:
+            continue
+        alpha = results[alpha_key]
+        rl = alpha_to_raceline(alpha, cl, normals)
+        kappa = compute_curvature_from_path(rl)
+        cum = np.cumsum(kappa**2)
+        lines_kappa.append((label, kappa, color, ls, 1.5))
+        lines_cum.append((label.split(' ')[0], cum, color, ls, 1.5))
+        totals[label.split(' ')[0]] = cum[-1]
+
+    # print comparison
+    print(f"\n  CURVATURE COMPARISON (Sum kappa^2 at {n_stations} stations)")
+    print(f"  {'Method':<25} {'Sum kappa^2':>14} {'vs center':>12}")
+    print(f"  {'─'*51}")
+    for name, total in totals.items():
+        pct_center = (1 - total / total_center) * 100
+        print(f"  {name:<25} {total:>14.6f} {pct_center:>+11.1f}%")
+
+    numericals = {k: v for k, v in totals.items()
+                  if k != 'Centerline'}
+    if numericals:
+        best_num = min(numericals.values())
+        reduction = (1 - best_num / total_center) * 100
+        print(f"\n  Curvature reduction: {reduction:.1f}% vs centerline")
+
+    # ── Plot ──
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), facecolor='#111')
+    fig.suptitle(f'{track.name} — Curvature Comparison ({n_stations} stations)',
+                 color='white', fontsize=15, fontweight='bold', y=0.98)
+
+    ax1.set_facecolor('#1a1a1a')
+    for name, kappa, color, ls, lw in lines_kappa:
+        ax1.plot(s_norm, np.abs(kappa), ls, color=color, lw=lw, label=name, alpha=0.85)
+    ax1.set_xlabel('Track position (%)', color='white', fontsize=10)
+    ax1.set_ylabel('|Curvature|', color='white', fontsize=10)
+    ax1.set_title('Pointwise |Curvature|', color='white', fontsize=12, fontweight='bold')
+    ax1.legend(fontsize=8, facecolor='#222', edgecolor='#555', labelcolor='white')
+    ax1.tick_params(colors='#aaa')
+    for spine in ax1.spines.values():
+        spine.set_color('#555')
+
+    ax2.set_facecolor('#1a1a1a')
+    for name, cum, color, ls, lw in lines_cum:
+        ax2.plot(s_norm, cum, ls, color=color, lw=lw, label=name, alpha=0.85)
+    ax2.set_xlabel('Track position (%)', color='white', fontsize=10)
+    ax2.set_ylabel('Cumulated Sum(kappa^2)', color='white', fontsize=10)
+    ax2.set_title('Cumulated Squared Curvature', color='white', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=8, facecolor='#222', edgecolor='#555', labelcolor='white')
+    ax2.tick_params(colors='#aaa')
+    for spine in ax2.spines.values():
+        spine.set_color('#555')
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    if output_path:
+        fig.savefig(output_path, facecolor=fig.get_facecolor(),
+                    dpi=150, bbox_inches='tight')
+        print(f"  Saved: {output_path}")
+    plt.close(fig)
+
+
+# ── Theoretical bound validation (circular track) ────────────────────────
+
+def theoretical_bound_validation(track, results, n_stations=200, output_path=None):
+    """
+    On a CIRCULAR track (constant curvature), the exact analytical solution
+    for min sum(kappa^2) is known:
+
+        Optimal path = inner boundary at radius R_inner = R - w/2
+        kappa_optimal = 1 / R_inner  (constant everywhere)
+        Sum(kappa^2) = N * kappa_optimal^2
+
+    This validates our numerical solvers against ground truth.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon
+
+    # Get track geometry
+    R = np.mean(np.linalg.norm(track.centerline, axis=1))  # average radius
+    w = np.mean(track.widths)  # track half-width (center to boundary)
+    # The optimizer uses bounds [-w/2, w/2] (see solve_custom/solve_scipy)
+    # so the max inward offset is w/2, giving inner radius R - w/2
+    alpha_max = w / 2.0  # optimizer's max offset
+
+    # Exact analytical solution within optimizer bounds
+    R_inner = R - alpha_max
+    kappa_exact = 1.0 / R_inner  # curvature of inner circle
+
+    # At optimization resolution
+    n_full = len(track.centerline)
+    idx = np.linspace(0, n_full - 1, n_stations, dtype=int)
+    cl = track.centerline[idx]
+    normals = track.normals[idx]
+    widths = track.widths[idx]
+
+    kappa_center = compute_curvature_from_path(cl)
+    sum_kappa2_center = np.sum(kappa_center**2)
+
+    # Exact analytical: alpha = -w/2 everywhere (inner boundary of optimizer range)
+    alpha_exact_arr = -widths / 2.0
+    rl_exact = alpha_to_raceline(alpha_exact_arr, cl, normals)
+    kappa_exact_numerical = compute_curvature_from_path(rl_exact)
+    sum_kappa2_exact = np.sum(kappa_exact_numerical**2)
+    # Also compute the theoretical value for reference
+    sum_kappa2_theory = n_stations * kappa_exact**2
+
+    print(f"\n  THEORETICAL VALIDATION — Circular Track")
+    print(f"  Center radius R = {R:.1f} m, track half-width w = {w:.1f} m")
+    print(f"  Optimizer max offset = w/2 = {alpha_max:.1f} m")
+    print(f"  Optimal inner radius = R - w/2 = {R_inner:.1f} m")
+    print(f"  Exact kappa = 1/{R_inner:.1f} = {kappa_exact:.6f}")
+    print(f"  {'─'*60}")
+    print(f"  {'Method':<25} {'Sum kappa^2':>14} {'vs exact':>12} {'% gap':>10}")
+    print(f"  {'─'*60}")
+
+    print(f"  Theoretical N*kappa^2 = {sum_kappa2_theory:.6f} (if curvature were exactly 1/R)")
+    print(f"  Numerical (same path) = {sum_kappa2_exact:.6f}")
+    print()
+
+    rows = [
+        ('Exact (alpha=-w/2)', sum_kappa2_exact),
+        ('Centerline', sum_kappa2_center),
+    ]
+
+    for alpha_key, label in [('alpha_custom', 'Custom (Adam+BFGS)'),
+                              ('alpha_scipy', 'Scipy (SLSQP)')]:
+        if alpha_key in results:
+            alpha = results[alpha_key]
+            rl = alpha_to_raceline(alpha, cl, normals)
+            kappa = compute_curvature_from_path(rl)
+            rows.append((label, np.sum(kappa**2)))
+
+    for name, val in rows:
+        gap = (val / sum_kappa2_exact - 1) * 100
+        print(f"  {name:<25} {val:>14.6f} {val - sum_kappa2_exact:>+12.6f} {gap:>+9.2f}%")
+
+    # Verify that optimal alpha should be -w/2 (push to inside of curve)
+    # For a circle centered at origin traced CCW, normals point outward
+    # so alpha = -w/2 means move inward (to optimizer's bound)
+    alpha_exact = -widths / 2.0  # inner boundary of optimizer's range
+
+    if 'alpha_custom' in results:
+        alpha_c = results['alpha_custom']
+        mean_diff = np.mean(np.abs(alpha_c - alpha_exact))
+        print(f"\n  Custom alpha vs exact (alpha=-w/2):")
+        print(f"    Mean |diff| = {mean_diff:.4f} (should be ~0)")
+        print(f"    Mean alpha_custom = {np.mean(alpha_c):.4f} (exact = {np.mean(alpha_exact):.4f})")
+
+    if 'alpha_scipy' in results:
+        alpha_s = results['alpha_scipy']
+        mean_diff = np.mean(np.abs(alpha_s - alpha_exact))
+        print(f"  Scipy alpha vs exact (alpha=-w/2):")
+        print(f"    Mean |diff| = {mean_diff:.4f} (should be ~0)")
+        print(f"    Mean alpha_scipy = {np.mean(alpha_s):.4f} (exact = {np.mean(alpha_exact):.4f})")
+
+    # ── Plot ──
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7), facecolor='#111')
+    fig.suptitle(f'Circular Track — Theoretical Bound Validation (R={R:.0f}m, w={w:.0f}m)',
+                 color='white', fontsize=15, fontweight='bold', y=0.98)
+
+    # Panel 1: Track with lines
+    ax = axes[0]
+    ax.set_facecolor('#1a3a15')
+    road = np.vstack([track.left_boundary, track.right_boundary[::-1],
+                      track.left_boundary[0:1]])
+    ax.add_patch(Polygon(road, closed=True, fc='#3a3a3a', ec='none', zorder=1))
+    ax.plot(track.left_boundary[:, 0], track.left_boundary[:, 1],
+            'w-', lw=0.8, alpha=0.5, zorder=3)
+    ax.plot(track.right_boundary[:, 0], track.right_boundary[:, 1],
+            'w-', lw=0.8, alpha=0.5, zorder=3)
+
+    # Centerline
+    ax.plot(track.centerline[:, 0], track.centerline[:, 1], '-',
+            color='#ffdd00', lw=2, label='Centerline', zorder=4, alpha=0.8)
+
+    # Exact inner circle (at optimizer's max offset)
+    t_plot = np.linspace(0, 2*np.pi, 500)
+    ax.plot(R_inner * np.cos(t_plot), R_inner * np.sin(t_plot), '-',
+            color='#00ff88', lw=2.5, label=f'Exact optimal (R={R_inner:.1f}m)',
+            zorder=7)
+
+    if 'raceline_custom' in results:
+        rl = results['raceline_custom']
+        ax.plot(rl[:, 0], rl[:, 1], '-', color='#ff3333', lw=1.5,
+                label='Custom', zorder=5)
+    if 'raceline_scipy' in results:
+        rl = results['raceline_scipy']
+        ax.plot(rl[:, 0], rl[:, 1], '--', color='#33ccff', lw=1.5,
+                label='Scipy', zorder=6, alpha=0.9)
+
+    ax.set_aspect('equal')
+    ax.legend(loc='upper left', fontsize=8, facecolor='#222',
+              edgecolor='#555', labelcolor='white')
+    ax.set_title('Racing Lines vs Exact Solution', color='white',
+                 fontsize=12, fontweight='bold')
+    ax.axis('off')
+
+    # Panel 2: Alpha comparison
+    ax2 = axes[1]
+    ax2.set_facecolor('#1a1a1a')
+    s_norm = np.linspace(0, 100, n_stations)
+    ax2.axhline(-alpha_max, color='#00ff88', ls='-', lw=2.5,
+                label=f'Exact alpha = {-alpha_max:.1f}', alpha=0.9)
+    if 'alpha_custom' in results:
+        ax2.plot(s_norm, results['alpha_custom'], '-', color='#ff3333',
+                 lw=1.5, label='Custom', alpha=0.8)
+    if 'alpha_scipy' in results:
+        ax2.plot(s_norm, results['alpha_scipy'], '--', color='#33ccff',
+                 lw=1.5, label='Scipy', alpha=0.8)
+    ax2.axhline(0, color='#ffdd00', ls=':', lw=1, alpha=0.4, label='Centerline (alpha=0)')
+    ax2.axhline(alpha_max, color='white', ls=':', lw=0.5, alpha=0.3)
+    ax2.axhline(-alpha_max, color='white', ls=':', lw=0.5, alpha=0.3)
+    ax2.set_xlabel('Track position (%)', color='white', fontsize=10)
+    ax2.set_ylabel('Lateral offset alpha (m)', color='white', fontsize=10)
+    ax2.set_title('Lateral Offset vs Exact', color='white', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=8, facecolor='#222', edgecolor='#555', labelcolor='white')
+    ax2.tick_params(colors='#aaa')
+    for spine in ax2.spines.values():
+        spine.set_color('#555')
+
+    # Panel 3: Bar chart — Sum kappa^2
+    ax3 = axes[2]
+    ax3.set_facecolor('#1a1a1a')
+    bar_names = [r[0] for r in rows]
+    bar_vals = [r[1] for r in rows]
+    colors = ['#00ff88', '#88cc44', '#ffdd00', '#ff3333', '#33ccff'][:len(rows)]
+    bars = ax3.barh(range(len(rows)), bar_vals, color=colors, edgecolor='white',
+                    linewidth=0.5, alpha=0.85)
+    ax3.set_yticks(range(len(rows)))
+    ax3.set_yticklabels(bar_names, color='white', fontsize=9)
+    ax3.set_xlabel('Sum(kappa^2)', color='white', fontsize=10)
+    ax3.set_title('Objective Value Comparison', color='white', fontsize=12, fontweight='bold')
+
+    # annotate with gap %
+    for i, (bar, (name, val)) in enumerate(zip(bars, rows)):
+        gap = (val / sum_kappa2_exact - 1) * 100
+        label = f'{val:.4f} ({gap:+.1f}%)' if abs(gap) > 0.01 else f'{val:.4f} (exact)'
+        ax3.text(bar.get_width() + 0.0002, bar.get_y() + bar.get_height()/2,
+                 label, va='center', color='white', fontsize=8)
+
+    ax3.tick_params(colors='#aaa')
+    for spine in ax3.spines.values():
+        spine.set_color('#555')
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    if output_path:
+        fig.savefig(output_path, facecolor=fig.get_facecolor(),
+                    dpi=150, bbox_inches='tight')
+        print(f"  Saved: {output_path}")
+    plt.close(fig)
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -961,7 +1265,20 @@ if __name__ == '__main__':
     fig_dir = os.path.join(os.path.dirname(__file__), '..', 'figures')
     os.makedirs(fig_dir, exist_ok=True)
 
-    track_names = ['monaco', 'hairpin', 'complex']
+    # ── Part 0: Theoretical validation on circular track ──
+    print(f"\n{'#'*70}")
+    print(f"  THEORETICAL VALIDATION: Circular Track")
+    print(f"{'#'*70}")
+    circle_track = get_track('circle')
+    circle_results = optimize_racing_line(circle_track, n_stations=200, solver='both')
+    print_comparison(circle_track, circle_results)
+    theoretical_bound_validation(circle_track, circle_results,
+                                  output_path=os.path.join(fig_dir, 'theoretical_validation.png'))
+    curvature_comparison(circle_track, circle_results,
+                          output_path=os.path.join(fig_dir, 'analytical_circle.png'))
+
+    # ── Part 1: Optimization on all tracks ──
+    track_names = ['oval', 'monaco', 'hairpin', 'complex']
     all_tracks = []
     all_results = []
 
@@ -973,14 +1290,21 @@ if __name__ == '__main__':
         track = get_track(track_name)
         results = optimize_racing_line(track, n_stations=200, solver='both')
         print_comparison(track, results)
-        plot_full_analysis(track, results,
-                           output_path=os.path.join(fig_dir, f'analysis_{track_name}.png'))
+
+        # analytical comparison
+        curvature_comparison(track, results,
+                              output_path=os.path.join(fig_dir, f'analytical_{track_name}.png'))
+
+        if track_name != 'oval':  # full analysis for non-trivial tracks
+            plot_full_analysis(track, results,
+                               output_path=os.path.join(fig_dir, f'analysis_{track_name}.png'))
         plot_convergence(results,
                          output_path=os.path.join(fig_dir, f'convergence_{track_name}.png'))
+
         all_tracks.append(track)
         all_results.append(results)
 
-    # multi-track summary
-    plot_multi_track_summary(all_tracks, all_results,
+    # multi-track summary (skip oval for the summary)
+    plot_multi_track_summary(all_tracks[1:], all_results[1:],
                              output_path=os.path.join(fig_dir, 'summary_all_tracks.png'))
     print("\nAll tracks processed.")
