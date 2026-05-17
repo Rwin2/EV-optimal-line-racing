@@ -111,29 +111,6 @@ For each race strategy:
 
 ---
 
-## Race Strategies
-
-The simulator runs multiple **race strategies** in parallel. Each strategy combines an offline racing line with an online tracking controller.
-
-| Key | Display Name | Racing Line (offline) | Controller | Speed Tracking |
-|---|---|---|---|---|
-| `center` | Center-Line | Centerline | Pure Pursuit | `curvature` (70% μg) |
-| `optimal` | Min-LapTime | SCP optimizer | Pure Pursuit | `aggressive` (95% μg) |
-| `aggressive` | Aggressive | SCP optimizer | Pure Pursuit | `aggressive` (95% μg) |
-| `eco` | Eco-Save | Centerline | Pure Pursuit | `energy_saving` (50% μg) |
-| `ilqr` | TV-LQR | SCP optimizer | iLQR (Riccati) | SCP speed profile |
-
-**Speed tracking modes** (used by `PurePursuitController` to compute target speed at each point):
-
-| Mode | Lateral grip fraction | Max speed |
-|---|---|---|
-| `aggressive` | 95% | v_max |
-| `curvature` | 70% | 85% of v_max |
-| `energy_saving` | 50% | 40 m/s |
-| `constant` | — | 25 m/s |
-
----
-
 ## Available Tracks
 
 | Key | Description |
