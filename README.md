@@ -2,118 +2,228 @@
 
 **AA222/CS361 Final Project**
 
-Optimal racing line optimization for electric vehicles on closed circuits. This project formulates and solves a dual optimization problem: minimizing lap time while managing battery energy consumption, using Model Predictive Control (MPC).
+Optimal racing line optimization for electric vehicles on closed circuits. This project formulates and solves the minimum-lap-time path optimization problem while accounting for EV battery energy constraints.
 
 ## Authors
 - Erwin Poussi (erwinpi@stanford.edu)
 - Matthieu Hautsch (matthaut@stanford.edu)
 
+---
+
 ## Project Structure
+
 ```
 EV-optimal-line-racing/
-├── src/                    # Source code
-│   ├── track.py            # Track generation (oval, complex, monza, figure-8)
-│   ├── car.py              # Bicycle model + EV battery/motor dynamics
-│   ├── controller.py       # Racing controllers & baselines (pure pursuit)
-│   └── simulator.py        # Main entry: simulation engine + rendering
-├── references/             # Paper references and course materials
-├── report/                 # LaTeX proposal and final report
-│   ├── main.tex
-│   ├── references.bib
-│   └── aa222-jmlr2e.sty
-├── figures/                # Generated figures for the report
-├── races/                  # [untracked] Race outputs (timestamped)
+├── src/
+│   ├── track.py        # Track geometry generation
+│   ├── car.py          # Vehicle physics (bicycle model + EV battery)
+│   ├── optimizer.py    # Offline racing line optimizer (SCP + Simplex)
+│   ├── simplex.py      # Simplex LP solver (Ch 12, course reader)
+│   ├── controller.py   # Online tracking controllers (Pure Pursuit, iLQR)
+│   └── simulator.py    # Orchestrator: runs race, renders video/GIF
+├── references/         # Papers and course materials
+├── report/             # LaTeX report (main.tex, references.bib)
+├── figures/            # Generated output figures
+├── races/              # [untracked] Race outputs (timestamped)
 │   └── race_YYYYMMDD_HHMMSS/
-│       ├── video/          # race.mp4 or race.gif
+│       ├── video/race.gif
 │       └── results/
 │           ├── benchmark.json
 │           ├── benchmark.md
-│           └── <controller>/metrics.json
-├── NOTES.md                # [untracked] Project reflexion notes
-└── .gitignore
+│           └── <strategy>/metrics.json
+└── NOTES.md            # [untracked] Project notes
 ```
 
+---
+
+## Architecture and Data Flow
+
+The pipeline splits cleanly into **offline planning** (done once before the race) and **online control** (runs every timestep during simulation).
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ OFFLINE  (runs once, before the race)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+track.py
+  └─ generates Track object:
+       centerline (N,2), left/right boundaries,
+       normals, half-widths, arc-length
+
+optimizer.py  [the core]
+  └─ parameterizes racing line as:
+       raceline = centerline + α·normals
+     where α ∈ [-w, w] is the lateral offset
+  └─ minimizes one of three objectives:
+       'laptime'   → min Σ(ds/v)          ← correct objective
+       'curvature' → min Σκ²              ← geometric proxy
+       'energy'    → min net EV energy
+  └─ solver: SCP (linearize → Simplex LP → trust region)
+  └─ outputs: raceline (N,2) array
+
+speed profiler  [inside optimizer.py]
+  └─ given the raceline, computes target speed
+     at each point via forward-backward pass:
+       1. cornering limit: v ≤ √(μg / |κ|)
+       2. forward pass:    acceleration limited
+       3. backward pass:   braking limited
+       4. power cap:       v ≤ P_max / F
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ONLINE  (every dt = 0.02 s, during race)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PurePursuitController  [controller.py]
+  input:  current car state (x, y, ψ, vx, vy, ω, SOC)
+  └─ finds nearest point on raceline
+  └─ looks ahead by a fixed distance → target point
+  └─ computes steering angle δ (pure pursuit geometry)
+  └─ computes drive force F via PD speed error
+  output: (δ, F_drive)
+
+ILQRController  [controller.py]
+  OFFLINE: linearize bicycle dynamics along SCP reference,
+           backward Riccati recursion → gains Y[k], offsets y[k]
+  ONLINE:  u[k] = u_ref[k] + Y[k] @ (s[k] - s_ref[k]) + y[k]
+
+BicycleModel.step()  [car.py]
+  input:  state, (δ, F_drive), dt
+  └─ RK4 integration of 7-state ODE:
+       (x, y, ψ, vx, vy, ω, SOC)
+  └─ tire slip angles → lateral forces
+  └─ friction circle clamping
+  └─ power → SOC dynamics
+  output: new state
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ORCHESTRATOR  [simulator.py]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For each race strategy:
+  1. Call optimizer (offline) → raceline + speed profile
+  2. Build PurePursuitController with that raceline
+  3. Step simulation loop:
+       controller.control(state) → (δ, F)
+       car.step(state, δ, F, dt) → state
+  4. Log metrics (lap time, SOC, energy, speed)
+  5. Render video frame by frame → GIF/MP4
+```
+
+---
+
+## Race Strategies
+
+The simulator runs multiple **race strategies** in parallel. Each strategy combines an offline racing line with an online tracking controller.
+
+| Key | Display Name | Racing Line (offline) | Controller | Speed Tracking |
+|---|---|---|---|---|
+| `center` | Center-Line | Centerline | Pure Pursuit | `curvature` (70% μg) |
+| `optimal` | Min-LapTime | SCP optimizer | Pure Pursuit | `aggressive` (95% μg) |
+| `aggressive` | Aggressive | SCP optimizer | Pure Pursuit | `aggressive` (95% μg) |
+| `eco` | Eco-Save | Centerline | Pure Pursuit | `energy_saving` (50% μg) |
+| `ilqr` | TV-LQR | SCP optimizer | iLQR (Riccati) | SCP speed profile |
+
+**Speed tracking modes** (used by `PurePursuitController` to compute target speed at each point):
+
+| Mode | Lateral grip fraction | Max speed |
+|---|---|---|
+| `aggressive` | 95% | v_max |
+| `curvature` | 70% | 85% of v_max |
+| `energy_saving` | 50% | 40 m/s |
+| `constant` | — | 25 m/s |
+
+---
+
+## Available Tracks
+
+| Key | Description |
+|---|---|
+| `oval` | Simple ellipse |
+| `circle` | Perfect circle (used for theoretical validation) |
+| `complex` | Grand Prix-style circuit (hairpins, chicanes) |
+| `hairpin` | Exaggerated hairpins and tight S-bends |
+| `monaco` | Sharp 90-degree corners connected by straights |
+| `monza` | Long straights with tight chicanes |
+| `figure_eight` | Lemniscate of Bernoulli (self-crossing) |
+
+---
+
 ## Setup
+
 ```bash
 pip install numpy scipy matplotlib pillow
 ```
-For MP4 video output, you also need `ffmpeg` installed:
+
+For MP4 output (requires ffmpeg):
 ```bash
-brew install ffmpeg    # macOS
+brew install ffmpeg   # macOS
 ```
 
-## Running a Race
+---
+
+## Running
 
 ```bash
 cd src/
 
-# Default race: 4 controllers on the complex circuit (40s, GIF output)
+# Default race on complex circuit
 python simulator.py --gif
 
-# Choose track and controllers
-python simulator.py --track monza --controllers center aggressive eco --gif
+# Choose track and strategies
+python simulator.py --track monaco --controllers center optimal aggressive eco --gif
 
-# MP4 video (requires ffmpeg)
-python simulator.py --track complex --time 60 --fps 20
+# MP4 output
+python simulator.py --track monza --time 60 --fps 20
 
-# Only generate the static figure (for the proposal)
-python simulator.py --figure-only
-
-# Skip video, only save metrics
+# Just save metrics, no video
 python simulator.py --no-video
+
+# Run the optimizer standalone (generates figures/)
+python optimizer.py
 ```
 
-### Available Tracks
-| Track | Description |
-|-------|-------------|
-| `oval` | Simple elliptical circuit |
-| `complex` | Grand Prix-style with hairpins and chicanes |
-| `monza` | Monza-inspired: long straights + tight corners |
-| `figure_eight` | Lemniscate of Bernoulli shape |
+---
 
-### Available Controllers (Baselines)
-| Key | Strategy | Description |
-|-----|----------|-------------|
-| `center` | Center-Line | Follows track centerline, curvature-based speed |
-| `optimal` | Min-Curvature | Smooths corners by using track width |
-| `aggressive` | Aggressive | Uses 95% tire grip, max speed everywhere |
-| `eco` | Eco-Save | Conservative speed, energy-efficient |
-| `constant` | Constant-Speed | Fixed 90 km/h, centerline |
+## Validating the Optimizer
 
-### Race Output Structure
-Each run creates a timestamped directory under `races/`:
-```
-races/race_20260424_143022/
-├── video/race.gif              # Visual output
-└── results/
-    ├── benchmark.json          # All controllers compared
-    ├── benchmark.md            # Human-readable summary table
-    ├── center/metrics.json     # Per-controller detailed metrics
-    ├── aggressive/metrics.json
-    └── ...
+**Quick bounds check (circular track — exact solution known):**
+```python
+from track import get_track
+from optimizer import optimize_racing_line
+import numpy as np
+
+track = get_track('circle')
+results = optimize_racing_line(track, n_stations=100, solver='scipy', obj='curvature')
+alpha = results['alpha_scipy']
+w = np.mean(track.widths)
+print(f"Track half-width:  {w:.1f} m")
+print(f"Max |alpha|:        {np.max(np.abs(alpha)):.2f} m  (should approach {w:.1f})")
+print(f"Mean alpha:         {np.mean(alpha):.2f} m  (should be ~ -{w:.1f}, inner boundary)")
 ```
 
-## Code Architecture
-
+**Race comparison (the key sanity check):**
+```bash
+python simulator.py --track monaco --controllers center optimal aggressive --no-video
 ```
-simulator.py (orchestrator)
-    ├── track.py       → generates Track objects (centerline, boundaries, normals)
-    ├── car.py         → BicycleModel.step(state, delta, F_drive, dt) via RK4
-    ├── controller.py  → PurePursuitController.control(state) → (delta, F_drive)
-    └── rendering      → matplotlib-based track + car + telemetry visualization
-```
+`optimal` (min-laptime path) should post a faster lap time than both `center` and `aggressive`.
 
-**Simulation loop:**
-1. Generate track geometry (closed spline from control points)
-2. Compute racing lines (centerline or minimum-curvature heuristic)
-3. For each timestep: controller outputs (steering, throttle) → bicycle model integration → update state
-4. Save metrics (distance, speed, SOC, energy) per controller
-5. Render video with pre-rendered track background + moving cars + live telemetry
+---
 
 ## Key Design Decisions
 
-- **Bicycle model**: captures both longitudinal and lateral dynamics (steering, drift, tire forces) while remaining fast enough for real-time optimization
-- **RK4 integration**: 4th-order Runge-Kutta for numerical stability at dt=0.02s
-- **Friction circle constraint**: tire forces limited by $F_x^2 + F_y^2 \leq (\mu mg)^2$
-- **Battery model**: power-based SOC evolution with separate traction/regen efficiencies
-- **Speed profiling**: forward-backward pass ensures acceleration/braking limits are respected
+- **Frenet parameterization**: racing line expressed as `α(s)` lateral offset from centerline, not (x,y) — this gives a clean 1D optimization variable with natural track boundary constraints
+- **Correct objective**: `obj='laptime'` minimizes `Σ(ds/v)` jointly over path and speed; `obj='curvature'` minimizes `Σκ²` which is a geometric proxy (faster to compute, less accurate)
+- **Warm-starting**: `laptime` and `energy` objectives warm-start from the `curvature` solution to avoid local minima
+- **Friction circle**: tire forces clamped by `√(Fx²+Fy²) ≤ μmg`
+- **EV battery model**: power-based SOC dynamics with separate motor efficiency (92%) and regen efficiency (65%)
+- **RK4 integration**: 4th-order Runge-Kutta at dt=0.01 s for numerical stability
+
+---
+
+## References
+
+- Kochenderfer & Wheeler, *Algorithms for Optimization*, MIT Press, 2019 — BFGS (Alg 6.6), Adam (Alg 5.8), Augmented Lagrangian (Alg 10.3)
+- Xiong, *Racing Line Optimization*, MIT MEng thesis, 2010 — problem formulation, `E = ∫√κ ds` proxy
+- van den Eshof, van Kampen & Salazar, *A Computationally Efficient Framework for Free-trajectory Minimum-lap-time Optimization of Racing Cars*, arXiv:2511.13522, 2025 — SCP approach, joint path+speed optimization
+- Heilmeier et al., *Minimum Curvature Trajectory Planning and Control for an Autonomous Race Car*, Vehicle System Dynamics, 2020
+- Rajamani, *Vehicle Dynamics and Control*, Springer, 2012 — bicycle model

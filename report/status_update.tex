@@ -1,0 +1,49 @@
+\documentclass[twoside,11pt]{article}
+
+\usepackage{aa222-jmlr2e}
+\usepackage{amsmath}
+\usepackage{url}
+
+\setlength{\parskip}{0pt}
+\setlength{\abovedisplayskip}{4pt}
+\setlength{\belowdisplayskip}{4pt}
+
+\begin{document}
+
+\title{Status Update: Optimal Racing Line and Trajectory Tracking for Electric Vehicles}
+\newcommand{\shorttitle}{EV Racing --- Status Update}
+
+\name{Erwin Poussi}
+\email{erwinpi@stanford.edu}
+
+\name{Matthieu Hautsch}
+\email{matthaut@stanford.edu}
+
+\maketitle
+\enlargethispage{0.8in}
+\vspace{-0.15in}
+
+\section{Problem Overview}
+\vspace{-0.08in}
+
+As described in our proposal, the racing line determines the maximum speed a car can carry through each corner, since the tires can only sustain a lateral acceleration bounded by $a_{\text{lat}} = \mu g$. At a given path curvature $\kappa$, the cornering speed is limited to $v \leq \sqrt{a_{\text{lat}}/|\kappa|}$. A naive strategy following the geometric centerline of the road incurs high curvature in corners and therefore low cornering speeds, but by exploiting the full road width to cut corners one can reduce the effective curvature and carry more speed. We parameterize the racing line by lateral offsets $\boldsymbol{\alpha}$ from the centerline, so that $\mathbf{p}_i = \mathbf{c}_i + \alpha_i\,\hat{\mathbf{n}}_i$ with $|\alpha_i| \leq w_i$, and jointly optimize the path and speed profile $\mathbf{v}$. Since the time to traverse a segment of arc length $\Delta s_i$ at speed $v_i$ is $\Delta s_i / v_i$, the total lap time is $J = \sum_i \Delta s_i / v_i$, which we minimize subject to grip, acceleration and braking constraints. The approach decomposes into two stages: an \emph{offline} path and speed optimizer, and an \emph{online} trajectory tracking controller.
+
+\vspace{-0.05in}
+\section{Offline Optimization via SCP and Simplex}
+\vspace{-0.08in}
+
+Since both the objective and the physics constraints (cornering grip, traction limits) depend nonlinearly on the path and speed variables, we solve this problem using Sequential Convex Programming (SCP). At each SCP iteration, we linearize the nonlinear constraints around the current iterate to form a linear program (LP), which we solve to find the best step within a trust region. The curvature Jacobian $\partial \kappa / \partial \boldsymbol{\alpha}$ required for linearization is computed via automatic differentiation.
+
+Each LP sub-problem is solved with a simplex algorithm that we implemented from scratch, following the two-phase tableau method described in the course reader. We convert the LP into equality form by introducing slack variables to define a convex polytope, then pivot from vertex to vertex along improving edges until optimality is reached. On our test circuit, the SCP optimizer converges monotonically over 10 iterations, reducing the predicted lap time from 35.2\,s to \textbf{26.9\,s}, compared to 40.3\,s for the centerline baseline.
+
+\vspace{-0.05in}
+\section{Online Trajectory Tracking via iLQR}
+\vspace{-0.08in}
+
+Once the optimal racing line and speed profile are computed offline, the remaining challenge is to track this reference with a vehicle that has nonlinear dynamics and limited actuators. We formulate this as a trajectory tracking problem using an iterative Linear Quadratic Regulator (iLQR). The vehicle is modeled as a planar bicycle with state $\mathbf{s} = [x, y, \psi, v_x, v_y, \omega]$ and control $\mathbf{u} = [\delta, F_{\text{drive}}]$. We convert the SCP output into a time-indexed reference $(\bar{\mathbf{s}}_k, \bar{\mathbf{u}}_k)$, linearize the dynamics at each point, and run a backward Riccati recursion to obtain time-varying gains $Y_k$ and offsets $y_k$. This recursion follows from the first-order optimality conditions (KKT) of the quadratic tracking cost subject to the linearized dynamics. Online, the controller applies $\mathbf{u}_k = \bar{\mathbf{u}}_k + Y_k(\mathbf{s}_k - \bar{\mathbf{s}}_k) + y_k$. On the test circuit, the offline plan predicts \textbf{26.9\,s} and the closed-loop simulation achieves \textbf{27.0\,s}, confirming tracking consistency.
+
+\vspace{-0.05in}
+\paragraph{Remaining Work.} Incorporate battery energy into the objective and trace the Pareto front between lap time and $\Delta SOC$; add stochastic grip perturbations to evaluate robust strategies; benchmark across multiple track geometries.
+
+
+\end{document}

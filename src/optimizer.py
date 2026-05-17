@@ -9,10 +9,16 @@ Two path solvers:
   1. Custom: Projected BFGS (Alg 6.6 with bound projection)
   2. Library: scipy.optimize.minimize with SLSQP
 
+SCP solver (joint path+speed):
+  - Linearizes nonlinear dynamics constraints around current iterate
+  - Solves LP sub-problem with the Simplex algorithm (Ch 12)
+  - Gradients computed with JAX automatic differentiation (Ch 2.4)
+
 References:
   - Kochenderfer & Wheeler, Algorithms for Optimization, 2nd ed.
     - BFGS: Algorithm 6.6, eq (6.26)
-    - Augmented Lagrangian: Algorithm 10.3, eq (10.37)-(10.38)
+    - Adam: Algorithm 5.8
+    - Simplex: Algorithms 12.1–12.5
 """
 
 import numpy as np
@@ -56,9 +62,9 @@ def compute_curvature_from_path(path):
     return kappa
 
 
-# ── Objective and gradient ───────────────────────────────────────────────
+# ── Objective functions ──────────────────────────────────────────────────
 
-def objective(alpha, centerline, normals):
+def objective_curvature(alpha, centerline, normals, car_params=None):
     """f(alpha) = sum of squared curvature + tiny smoothness regularizer."""
     path = alpha_to_raceline(alpha, centerline, normals)
     kappa = compute_curvature_from_path(path)
@@ -68,15 +74,48 @@ def objective(alpha, centerline, normals):
     return f_curv + f_smooth
 
 
-def gradient(alpha, centerline, normals, eps=1e-5):
+def objective_laptime(alpha, centerline, normals, car_params):
+    """f(alpha) = lap time = sum(ds / v), where v comes from velocity profile."""
+    path = alpha_to_raceline(alpha, centerline, normals)
+    kappa = compute_curvature_from_path(path)
+    ds = np.linalg.norm(np.diff(path, axis=0, append=path[0:1]), axis=1)
+    v = compute_velocity_profile(path, kappa, car_params, ds)
+    lap_time = np.sum(ds / np.maximum(v, 0.5))
+    # small smoothness regularizer to help convergence
+    dalpha = np.diff(alpha, append=alpha[0])
+    return lap_time + 1e-4 * np.sum(dalpha**2)
+
+
+def objective_energy(alpha, centerline, normals, car_params):
+    """f(alpha) = net energy consumption (drive - regen)."""
+    path = alpha_to_raceline(alpha, centerline, normals)
+    kappa = compute_curvature_from_path(path)
+    ds = np.linalg.norm(np.diff(path, axis=0, append=path[0:1]), axis=1)
+    v = compute_velocity_profile(path, kappa, car_params, ds)
+    energy = compute_energy(path, v, car_params, ds)
+    dalpha = np.diff(alpha, append=alpha[0])
+    return energy['net_energy_kJ'] + 1e-4 * np.sum(dalpha**2)
+
+
+# Map of available objectives
+OBJECTIVES = {
+    'curvature': objective_curvature,
+    'laptime': objective_laptime,
+    'energy': objective_energy,
+}
+
+
+def gradient(alpha, centerline, normals, car_params=None, obj_func=None, eps=1e-5):
     """Finite-difference gradient of the objective."""
+    if obj_func is None:
+        obj_func = objective_curvature
     n = len(alpha)
-    f0 = objective(alpha, centerline, normals)
+    f0 = obj_func(alpha, centerline, normals, car_params)
     grad = np.zeros(n)
     for i in range(n):
         alpha_p = alpha.copy()
         alpha_p[i] += eps
-        grad[i] = (objective(alpha_p, centerline, normals) - f0) / eps
+        grad[i] = (obj_func(alpha_p, centerline, normals, car_params) - f0) / eps
     return grad
 
 
@@ -181,135 +220,26 @@ def projected_bfgs(f, grad_f, x0, lb, ub, max_iter=500, tol=1e-8):
     return x_best, history
 
 
-# ── Augmented Lagrangian + BFGS (Algorithm 10.3) — kept for reference ────
-
-def _backtracking_line_search(f, x, d, g, alpha0=1.0, c1=1e-4, rho=0.5):
-    """Backtracking line search satisfying Armijo condition."""
-    a = alpha0
-    fx = f(x)
-    slope = g @ d
-    for _ in range(30):
-        if f(x + a * d) <= fx + c1 * a * slope:
-            return a
-        a *= rho
-    return a
-
-
-def bfgs_unconstrained(f, grad_f, x0, max_iter=200, tol=1e-6):
-    """Standard BFGS (Alg 6.6) for unconstrained subproblems."""
-    n = len(x0)
-    x = x0.copy()
-    Q = np.eye(n)
-    g = grad_f(x)
-
-    for k in range(1, max_iter + 1):
-        if np.linalg.norm(g) < tol:
-            break
-        d = -Q @ g
-        step = _backtracking_line_search(f, x, d, g)
-        x_new = x + step * d
-        g_new = grad_f(x_new)
-
-        s = x_new - x
-        y = g_new - g
-        sy = s @ y
-        if sy > 1e-12:
-            rho_k = 1.0 / sy
-            I = np.eye(n)
-            V = I - rho_k * np.outer(s, y)
-            Q = V @ Q @ V.T + rho_k * np.outer(s, s)
-
-        x = x_new
-        g = g_new
-
-    return x
-
-
-def augmented_lagrangian_bfgs(f, grad_f, constraints, jac_c, x0, lb, ub,
-                               rho0=1.0, gamma=2.0, k_outer=20, bfgs_iter=200):
-    """
-    Augmented Lagrangian (Alg 10.3) with projected BFGS inner solver.
-    Handles inequality constraints c(x) <= 0, plus box bounds.
-    """
-    x = np.clip(x0, lb, ub)
-    cx = constraints(x)
-    m = len(cx)
-    lam = np.zeros(m)
-    rho = rho0
-    history = []
-
-    for outer in range(k_outer):
-        def L(z):
-            fz = f(z)
-            cz = constraints(z)
-            act = np.maximum(lam + rho * cz, 0.0)
-            return fz + np.sum(act**2) / (2.0 * rho)
-
-        def grad_L(z):
-            gf = grad_f(z)
-            cz = constraints(z)
-            J = jac_c(z)
-            act = np.maximum(lam + rho * cz, 0.0)
-            return gf + J.T @ act
-
-        x, _ = projected_bfgs(L, grad_L, x, lb, ub, max_iter=bfgs_iter, tol=1e-7)
-
-        cx = constraints(x)
-        lam = np.maximum(lam + rho * cx, 0.0)
-        rho = min(rho * gamma, 1e6)
-
-        fval = f(x)
-        max_viol = np.max(np.maximum(cx, 0.0))
-        history.append((outer, fval, max_viol, rho))
-
-        if max_viol < 1e-6 and outer > 2:
-            break
-
-    return x, history
-
-
-# ── Constraint helpers ───────────────────────────────────────────────────
-
-def make_track_constraints(widths):
-    """
-    c(alpha) <= 0 where:
-      c_{2i}   =  alpha_i - w_i/2
-      c_{2i+1} = -alpha_i - w_i/2
-    """
-    half_w = widths / 2.0
-    n = len(widths)
-
-    def constraints(alpha):
-        upper = alpha - half_w
-        lower = -alpha - half_w
-        return np.concatenate([upper, lower])
-
-    def jacobian(alpha):
-        # analytical: top block = +I, bottom block = -I
-        J = np.zeros((2 * n, n))
-        J[:n, :] = np.eye(n)
-        J[n:, :] = -np.eye(n)
-        return J
-
-    return constraints, jacobian
 
 
 # ── Solvers ──────────────────────────────────────────────────────────────
 
-def solve_scipy(centerline, normals, widths, alpha0=None):
+def solve_scipy(centerline, normals, widths, alpha0=None,
+                obj='curvature', car_params=None):
     """Solve racing line optimization using scipy SLSQP."""
     n = len(centerline)
     if alpha0 is None:
         alpha0 = np.zeros(n)
 
-    half_w = widths / 2.0
+    half_w = widths  # widths is already center-to-boundary (half-width)
     bounds = [(-hw, hw) for hw in half_w]
+    obj_func = OBJECTIVES[obj]
 
     def f(alpha):
-        return objective(alpha, centerline, normals)
+        return obj_func(alpha, centerline, normals, car_params)
 
     def g(alpha):
-        return gradient(alpha, centerline, normals)
+        return gradient(alpha, centerline, normals, car_params, obj_func)
 
     result = scipy_minimize(f, alpha0, jac=g, method='SLSQP',
                             bounds=bounds,
@@ -317,39 +247,277 @@ def solve_scipy(centerline, normals, widths, alpha0=None):
     return result.x, result
 
 
-def solve_custom(centerline, normals, widths, alpha0=None):
+def solve_custom(centerline, normals, widths, alpha0=None,
+                 obj='curvature', car_params=None):
     """
     Two-phase custom solver:
       Phase 1: Projected Adam (robust global convergence)
       Phase 2: Projected BFGS (fast local refinement)
+
+    Same iteration count for all objectives. For laptime/energy,
+    warm-starts from the min-curvature solution (which is cheap to compute).
     """
     n = len(centerline)
     if alpha0 is None:
         alpha0 = np.zeros(n)
 
-    half_w = widths / 2.0
+    half_w = widths  # widths is already center-to-boundary (half-width)
     lb = -half_w
     ub = half_w
+    obj_func = OBJECTIVES[obj]
 
     def f(alpha):
-        return objective(alpha, centerline, normals)
+        return obj_func(alpha, centerline, normals, car_params)
 
     def g(alpha):
-        return gradient(alpha, centerline, normals)
+        return gradient(alpha, centerline, normals, car_params, obj_func)
 
-    # Phase 1: Vanilla Adam — run until convergence, no budget limit
+    # For expensive objectives, warm-start from curvature if starting from zero
+    if obj in ('laptime', 'energy') and np.allclose(alpha0, 0):
+        print(f"    [warm-start] solving curvature first...")
+        alpha_warm, _ = solve_custom(centerline, normals, widths,
+                                      alpha0, obj='curvature', car_params=car_params)
+        alpha0 = alpha_warm
+
+    # Same iterations for all objectives
+    adam_iter, bfgs_iter = 1500, 300
+    # Lower LR for non-smooth objectives (velocity profile has kinks)
+    lr = 0.1 if obj in ('laptime', 'energy') else 0.3
+
+    # Phase 1: Vanilla Adam
     alpha_adam, hist_adam = projected_adam(f, g, alpha0, lb, ub,
-                                          max_iter=3000, lr=0.5)
+                                          max_iter=adam_iter, lr=lr)
 
-    # Phase 2: BFGS refinement from Adam solution
+    # Phase 2: BFGS refinement
     alpha_opt, hist_bfgs = projected_bfgs(f, g, alpha_adam, lb, ub,
-                                           max_iter=500, tol=1e-10)
+                                           max_iter=bfgs_iter, tol=1e-10)
 
     # merge histories
     offset = hist_adam[-1][0] if hist_adam else 0
     history = hist_adam + [(h[0] + offset, h[1]) for h in hist_bfgs]
 
     return alpha_opt, history
+
+
+# ── SCP: Joint path+speed optimization ───────────────────────────────────
+
+def _jax_curvature_jacobian(alpha, centerline, normals):
+    """
+    Compute curvature and its Jacobian ∂κ/∂α using JAX autodiff (Ch 2.4).
+
+    Falls back to finite differences if JAX is not available.
+    """
+    try:
+        import jax
+        import jax.numpy as jnp
+
+        def _curvature_jax(a):
+            path = centerline + a[:, None] * normals
+            n = len(a)
+            pad = 3
+            x = jnp.concatenate([path[-pad:, 0], path[:, 0], path[:pad, 0]])
+            y = jnp.concatenate([path[-pad:, 1], path[:, 1], path[:pad, 1]])
+            dx = jnp.gradient(x); dy = jnp.gradient(y)
+            ddx = jnp.gradient(dx); ddy = jnp.gradient(dy)
+            dx = dx[pad:pad+n]; dy = dy[pad:pad+n]
+            ddx = ddx[pad:pad+n]; ddy = ddy[pad:pad+n]
+            speed = jnp.sqrt(dx**2 + dy**2)
+            speed = jnp.maximum(speed, 1e-10)
+            return (dx * ddy - dy * ddx) / speed**3
+
+        a_jax = jnp.array(alpha)
+        kappa = np.array(_curvature_jax(a_jax))
+        dkappa_da = np.array(jax.jacobian(_curvature_jax)(a_jax))
+        return kappa, dkappa_da
+
+    except ImportError:
+        # Fallback: finite differences
+        path = alpha_to_raceline(alpha, centerline, normals)
+        kappa = compute_curvature_from_path(path)
+        n = len(alpha)
+        eps_fd = 1e-4
+        dkappa_da = np.zeros((n, n))
+        for j in range(n):
+            a_p = alpha.copy()
+            a_p[j] += eps_fd
+            dkappa_da[:, j] = (compute_curvature_from_path(
+                alpha_to_raceline(a_p, centerline, normals)) - kappa) / eps_fd
+        return kappa, dkappa_da
+
+
+def solve_scp(centerline, normals, widths, car_params, alpha0=None,
+              rho=3.0, eps=1e-2, max_iters=10):
+    """
+    Joint path+speed optimization via Sequential Convex Programming (SCP).
+
+    Mirrors HW2 cart-pole SCP structure (cartpole_swingup_constrained.py):
+      - affinize: linearize nonlinear constraints (cornering/accel/braking)
+                  around current iterate (alpha, v)  [like affinize(f, s, u)]
+      - scp_iteration: solve LP sub-problem with Simplex (Ch 12)
+                       [like scp_iteration with cvxpy in HW2]
+      - outer loop: iterate until |ΔJ| < eps or max_iters
+                    [like solve_swingup_scp]
+
+    Variables: x = [alpha_0..alpha_{n-1},  v_0..v_{n-1}]
+    Objective: min Σ(ds_i / v_i)  (true lap time, linearized per iteration)
+    Constraints (all >= 0, linearized):
+      - Cornering:    a_lat - v_i² |κ_i(α)| >= 0
+      - Acceleration: v_i² + 2*a_lon*ds_i(α) - v_{i+1}² >= 0
+      - Braking:      v_{i+1}² + 2*a_brk*ds_i(α) - v_i² >= 0
+    Trust region:  |Δα_i| ≤ rho,  |Δv_i| ≤ 3*rho
+
+    LP sub-problem solved with the Simplex algorithm (Alg 12.1–12.5).
+    Curvature Jacobian ∂κ/∂α computed with JAX autodiff (Ch 2.4).
+    """
+    from simplex import solve_lp
+    import time
+
+    n = len(centerline)
+    p = car_params
+    g = 9.81
+    rho_init = rho
+    a_lat = p.mu * g * 0.85
+    a_lon = min(p.F_drive_max / p.mass, p.mu * g * 0.6)
+    a_brk = min(p.F_brake_max / p.mass, p.mu * g * 0.9)
+    half_w = widths
+
+    # Warm-start: alpha from caller, v from forward-backward pass
+    if alpha0 is None:
+        alpha0 = np.zeros(n)
+    path0 = alpha_to_raceline(alpha0, centerline, normals)
+    kappa0 = compute_curvature_from_path(path0)
+    ds0 = np.linalg.norm(np.diff(path0, axis=0, append=path0[0:1]), axis=1)
+    alpha = alpha0.copy()
+    v = compute_velocity_profile(path0, kappa0, car_params, ds0)
+
+    J_prev = np.inf
+    history = []
+
+    for it in range(max_iters):
+        t_iter = time.time()
+
+        # ── Current quantities ──
+        path = alpha_to_raceline(alpha, centerline, normals)
+        dpath = np.diff(path, axis=0, append=path[0:1])
+        ds = np.linalg.norm(dpath, axis=1)
+        v_next = np.roll(v, -1)
+
+        # Curvature + Jacobian via JAX (or FD fallback)
+        kappa, dkappa_da = _jax_curvature_jacobian(alpha, centerline, normals)
+
+        J = np.sum(ds / np.maximum(v, 1e-3))
+        history.append(J)
+        dJ = abs(J_prev - J)
+        print(f"    [SCP] iter {it:2d}: J={J:.4f}  dJ={dJ:.5f}")
+        if it > 0 and dJ < eps:
+            print(f"    [SCP] converged after {it} iterations.")
+            break
+        J_prev = J
+
+        # ── Affinize: compute constraint Jacobians ──
+        # (like affinize(f, s, u) in HW2 cartpole_swingup_constrained.py)
+
+        # Analytical ∂ds_i/∂α_j — banded: only j=i and j=(i+1)%n nonzero
+        dds_da = np.zeros((n, n))
+        for i in range(n):
+            ip1 = (i + 1) % n
+            dds_da[i, i]   = -np.dot(dpath[i], normals[i])   / ds[i]
+            dds_da[i, ip1] +=  np.dot(dpath[i], normals[ip1]) / ds[i]
+
+        sgn_k = np.where(kappa >= 0, 1.0, -1.0)
+
+        # ── Linearized objective gradient ──
+        c_obj = np.concatenate([
+            dds_da.T @ (1.0 / np.maximum(v, 1e-3)),
+            -ds / np.maximum(v, 1e-3)**2,
+        ])
+
+        # ── Linearized constraints: A_ub @ Δx ≤ b_ub ──
+
+        # Cornering: c_c_i = a_lat - v_i² |κ_i|
+        dc_c_da = -(v**2)[:, None] * sgn_k[:, None] * dkappa_da
+        dc_c_dv = np.diag(-2.0 * v * np.abs(kappa))
+        c_c0 = a_lat - v**2 * np.abs(kappa)
+
+        # Acceleration: c_a_i = v_i² + 2*a_lon*ds_i - v_{i+1}²
+        dc_a_da = 2.0 * a_lon * dds_da
+        dc_a_dv = np.zeros((n, n))
+        for i in range(n):
+            ip1 = (i + 1) % n
+            dc_a_dv[i, i]   =  2.0 * v[i]
+            dc_a_dv[i, ip1] = -2.0 * v_next[i]
+        c_a0 = v**2 + 2.0 * a_lon * ds - v_next**2
+
+        # Braking: c_b_i = v_{i+1}² + 2*a_brk*ds_i - v_i²
+        dc_b_da = 2.0 * a_brk * dds_da
+        dc_b_dv = np.zeros((n, n))
+        for i in range(n):
+            ip1 = (i + 1) % n
+            dc_b_dv[i, i]   = -2.0 * v[i]
+            dc_b_dv[i, ip1] =  2.0 * v_next[i]
+        c_b0 = v_next**2 + 2.0 * a_brk * ds - v**2
+
+        A_ub = np.vstack([
+            np.hstack([-dc_c_da, -dc_c_dv]),
+            np.hstack([-dc_a_da, -dc_a_dv]),
+            np.hstack([-dc_b_da, -dc_b_dv]),
+        ])
+        b_ub = np.concatenate([c_c0, c_a0, c_b0])
+
+        # ── Bounds: trust region ∩ absolute variable bounds ──
+        lb_scp = np.concatenate([
+            np.maximum(-rho,      -half_w - alpha),
+            np.maximum(-rho*3.0,   1.0    - v),
+        ])
+        ub_scp = np.concatenate([
+            np.minimum( rho,       half_w - alpha),
+            np.minimum( rho*3.0,   p.v_max - v),
+        ])
+
+        # ── Solve LP sub-problem with Simplex (Alg 12.1–12.5) ──
+        #
+        #   min  c_obj^T Δx         (linearized lap time)
+        #   s.t. A_ub Δx ≤ b_ub    (linearized physics constraints)
+        #        lb ≤ Δx ≤ ub       (trust region + absolute bounds)
+        #
+        # Converted to equality form (eq 12.8–12.10) with slack variables,
+        # then solved with the two-phase simplex (Alg 12.5).
+        t_lp = time.time()
+        delta = solve_lp(c_obj, A_ub, b_ub, lb_scp, ub_scp)
+        t_lp = time.time() - t_lp
+
+        max_viol = float(np.max(np.maximum(A_ub @ delta - b_ub, 0)))
+        obj_decrease = float(c_obj @ delta)
+        print(f"           LP: obj_Δ={obj_decrease:.4f}  max_viol={max_viol:.4f}  "
+              f"rho={rho:.2f}  time={t_lp:.1f}s  total={time.time()-t_iter:.1f}s")
+
+        # Adaptive trust region (like ρ in HW2 solve_swingup_scp)
+        if max_viol > 0.5:
+            damping = min(0.5 / max(max_viol, 1e-6), 1.0)
+            delta *= damping
+            rho = max(rho * 0.5, 0.1)
+            print(f"    [SCP] damping step by {damping:.2f}, rho -> {rho:.2f}")
+
+        # Accept step
+        alpha_new = np.clip(alpha + delta[:n], -half_w, half_w)
+        v_new     = np.clip(v     + delta[n:],  1.0, p.v_max)
+
+        # Evaluate actual objective at new point
+        path_new = alpha_to_raceline(alpha_new, centerline, normals)
+        ds_new = np.linalg.norm(np.diff(path_new, axis=0, append=path_new[0:1]), axis=1)
+        J_new = np.sum(ds_new / np.maximum(v_new, 1e-3))
+
+        if J_new < J:
+            # Good step — accept and maybe grow trust region
+            alpha, v = alpha_new, v_new
+            rho = min(rho * 1.2, rho_init)
+        else:
+            # Step increased objective — accept but shrink trust region
+            alpha, v = alpha_new, v_new
+            rho = max(rho * 0.5, 0.1)
+            print(f"    [SCP] J increased ({J:.4f} -> {J_new:.4f}), rho -> {rho:.2f}")
+
+    return alpha, v, history
 
 
 # ── Stage 2: Velocity profile optimization ───────────────────────────────
@@ -391,24 +559,16 @@ def compute_velocity_profile(path, kappa, car_params, ds=None):
     v_corner = np.sqrt(a_lat_max / abs_kappa)
     v_corner = np.minimum(v_corner, p.v_max)
 
-    # Step 2: power limit
-    # P = F_drive * v, at high speed: F_drive = P_max/v
-    # drag + rolling at speed v: F_resist = 0.5*rho*Cd*A*v^2 + Crr*m*g
-    # net: P_max/v - F_resist >= m*a => P_max >= v*(m*a + F_resist)
-    # for max speed: P_max = v * (0.5*rho*Cd*A*v^2 + Crr*m*g)
-    # solve cubic for v_power_limit... approximate:
-    v_power = np.full(n, p.v_max)
-    for i in range(n):
-        # find max v where P_max >= v * resistance(v)
-        for v_try in np.linspace(p.v_max, 5.0, 50):
-            F_drag = 0.5 * p.rho * p.C_d * p.A_front * v_try**2
-            F_roll = p.C_roll * p.mass * g
-            P_needed = v_try * (F_drag + F_roll)
-            if P_needed <= p.P_max:
-                v_power[i] = v_try
-                break
+    # Step 2: power limit (vectorized)
+    # P_max >= v * (0.5*rho*Cd*A*v^2 + Crr*m*g) => solve for max v
+    F_roll_const = p.C_roll * p.mass * g
+    v_candidates = np.linspace(p.v_max, 5.0, 50)
+    P_needed = v_candidates * (0.5 * p.rho * p.C_d * p.A_front * v_candidates**2 + F_roll_const)
+    # find highest v where P_needed <= P_max
+    valid = P_needed <= p.P_max
+    v_power_limit = v_candidates[np.argmax(valid)] if np.any(valid) else 5.0
 
-    v_profile = np.minimum(v_corner, v_power)
+    v_profile = np.minimum(v_corner, v_power_limit)
 
     # Step 3: forward pass (acceleration limited)
     # v_{i+1}^2 <= v_i^2 + 2 * a_max * ds_i
@@ -496,13 +656,19 @@ def compute_energy(path, v_profile, car_params, ds=None):
 
 # ── Full pipeline ────────────────────────────────────────────────────────
 
-def optimize_racing_line(track, n_stations=200, solver='both'):
+def optimize_racing_line(track, n_stations=200, solver='both', obj='curvature'):
     """
-    Full racing line optimization pipeline:
-      1. Subsample track
-      2. Optimize path (minimize curvature)
-      3. Compute velocity profile
-      4. Compute energy consumption
+    Full racing line optimization pipeline.
+
+    Args:
+        solver: 'custom' (Adam+BFGS, decoupled),
+                'scipy'  (SLSQP, decoupled),
+                'both'   (custom + scipy, decoupled),
+                'scp'    (joint path+speed SCP — always minimizes lap time)
+        obj: 'curvature' (min sum kappa^2),
+             'laptime'   (min lap time),
+             'energy'    (min net energy)
+             (ignored when solver='scp')
     """
     from car import CarParams
 
@@ -512,46 +678,74 @@ def optimize_racing_line(track, n_stations=200, solver='both'):
     centerline = track.centerline[idx]
     normals = track.normals[idx]
     widths = track.widths[idx]
-    alpha0 = np.zeros(n_stations)
 
-    results = {}
+    car = CarParams()
+    results = {'objective': obj}
 
-    # solve
+    # Curvature warm-start for laptime/energy decoupled solvers and SCP
+    if obj in ('laptime', 'energy') or solver == 'scp':
+        print(f"    [pipeline] warm-starting from curvature solution...")
+        alpha0, _ = solve_scipy(centerline, normals, widths,
+                                 alpha0=np.zeros(n_stations),
+                                 obj='curvature', car_params=car)
+    else:
+        alpha0 = np.zeros(n_stations)
+
+    # Decoupled solvers (path only, then velocity profile separately)
     if solver in ('custom', 'both'):
-        alpha_c, hist_c = solve_custom(centerline, normals, widths, alpha0.copy())
+        alpha_c, hist_c = solve_custom(centerline, normals, widths, alpha0.copy(),
+                                        obj=obj, car_params=car)
         results['alpha_custom'] = alpha_c
         results['history_custom'] = hist_c
 
     if solver in ('scipy', 'both'):
-        alpha_s, res_s = solve_scipy(centerline, normals, widths, alpha0.copy())
+        alpha_s, res_s = solve_scipy(centerline, normals, widths, alpha0.copy(),
+                                      obj=obj, car_params=car)
         results['alpha_scipy'] = alpha_s
         results['result_scipy'] = res_s
+
+    # SCP: joint path+speed optimizer (always minimizes lap time)
+    if solver == 'scp':
+        print(f"    [pipeline] running joint SCP optimizer...")
+        alpha_scp, v_scp, hist_scp = solve_scp(
+            centerline, normals, widths, car, alpha0=alpha0)
+        results['alpha_scp'] = alpha_scp
+        results['v_scp_raw'] = v_scp
+        results['history_scp'] = hist_scp
 
     # interpolate to full resolution
     from scipy.interpolate import interp1d
     t_sub = np.linspace(0, 1, n_stations)
     t_full = np.linspace(0, 1, n_full)
 
-    car = CarParams()
+    smooth_size = max(3, n_full // n_stations)
 
-    for key in ['custom', 'scipy']:
+    for key in ['custom', 'scipy', 'scp']:
         alpha_key = f'alpha_{key}'
         if alpha_key not in results:
             continue
 
         alpha_sub = results[alpha_key]
 
-        # interpolate and clamp
+        # interpolate and clamp alpha to full resolution
         alpha_full = interp1d(t_sub, alpha_sub, kind='cubic',
                               fill_value='extrapolate')(t_full)
-        alpha_full = np.clip(alpha_full, -track.widths / 2, track.widths / 2)
-        # smooth proportional to upsampling ratio to avoid interpolation artifacts
-        smooth_size = max(3, n_full // n_stations)
+        alpha_full = np.clip(alpha_full, -track.widths, track.widths)
         alpha_full = uniform_filter1d(alpha_full, size=smooth_size, mode='wrap')
 
         raceline = alpha_to_raceline(alpha_full, track.centerline, track.normals)
         kappa = compute_curvature_from_path(raceline)
-        v_profile = compute_velocity_profile(raceline, kappa, car)
+
+        # SCP: also interpolate the jointly-optimized velocity profile
+        if key == 'scp' and 'v_scp_raw' in results:
+            v_sub = results['v_scp_raw']
+            v_profile = interp1d(t_sub, v_sub, kind='cubic',
+                                 fill_value='extrapolate')(t_full)
+            v_profile = np.clip(v_profile, 1.0, car.v_max)
+            v_profile = uniform_filter1d(v_profile, size=smooth_size, mode='wrap')
+        else:
+            v_profile = compute_velocity_profile(raceline, kappa, car)
+
         energy = compute_energy(raceline, v_profile, car)
 
         results[f'raceline_{key}'] = raceline
@@ -572,7 +766,7 @@ def optimize_racing_line(track, n_stations=200, solver='both'):
     # subsampled curvatures for comparison table
     rl_sub_center = centerline
     results['curvature_sub_center'] = compute_curvature_from_path(rl_sub_center)
-    for key in ['custom', 'scipy']:
+    for key in ['custom', 'scipy', 'scp']:
         ak = f'alpha_{key}'
         if ak in results:
             rl_sub = alpha_to_raceline(results[ak], centerline, normals)
@@ -580,731 +774,3 @@ def optimize_racing_line(track, n_stations=200, solver='both'):
 
     return results
 
-
-# ── Comparison report ────────────────────────────────────────────────────
-
-def print_comparison(track, results):
-    """Print comparison table for all solvers."""
-    print(f"\n{'='*70}")
-    print(f"  {track.name} — Optimization Results")
-    print(f"  Track length: {track.length:.0f} m")
-    print(f"{'='*70}")
-
-    has_custom = 'alpha_custom' in results
-    has_scipy = 'alpha_scipy' in results
-
-    # path metrics
-    print(f"\n  PATH OPTIMIZATION (minimize curvature)")
-    print(f"  {'Metric':<28} {'Centerline':>12}", end='')
-    if has_custom: print(f" {'Custom':>12}", end='')
-    if has_scipy:  print(f" {'Scipy':>12}", end='')
-    print()
-    print(f"  {'─'*64}")
-
-    kc = results['curvature_sub_center']
-    row = lambda name, vals: _print_row(name, vals, has_custom, has_scipy)
-
-    vals = [np.sum(kc**2)]
-    if has_custom: vals.append(np.sum(results['curvature_sub_custom']**2))
-    if has_scipy:  vals.append(np.sum(results['curvature_sub_scipy']**2))
-    row('Sum kappa^2', vals)
-
-    vals = [np.max(np.abs(kc))]
-    if has_custom: vals.append(np.max(np.abs(results['curvature_sub_custom'])))
-    if has_scipy:  vals.append(np.max(np.abs(results['curvature_sub_scipy'])))
-    row('Max |kappa|', vals)
-
-    # velocity metrics
-    print(f"\n  VELOCITY PROFILE")
-    vc = results['velocity_center']
-    vals = [np.mean(vc) * 3.6]
-    if has_custom: vals.append(np.mean(results['velocity_custom']) * 3.6)
-    if has_scipy:  vals.append(np.mean(results['velocity_scipy']) * 3.6)
-    row('Avg speed (km/h)', vals)
-
-    vals = [np.max(vc) * 3.6]
-    if has_custom: vals.append(np.max(results['velocity_custom']) * 3.6)
-    if has_scipy:  vals.append(np.max(results['velocity_scipy']) * 3.6)
-    row('Max speed (km/h)', vals)
-
-    vals = [results['energy_center']['lap_time_s']]
-    if has_custom: vals.append(results['energy_custom']['lap_time_s'])
-    if has_scipy:  vals.append(results['energy_scipy']['lap_time_s'])
-    row('Lap time (s)', vals)
-
-    # energy metrics
-    print(f"\n  ENERGY (EV)")
-    vals = [results['energy_center']['drive_energy_kJ']]
-    if has_custom: vals.append(results['energy_custom']['drive_energy_kJ'])
-    if has_scipy:  vals.append(results['energy_scipy']['drive_energy_kJ'])
-    row('Drive energy (kJ)', vals)
-
-    vals = [results['energy_center']['regen_energy_kJ']]
-    if has_custom: vals.append(results['energy_custom']['regen_energy_kJ'])
-    if has_scipy:  vals.append(results['energy_scipy']['regen_energy_kJ'])
-    row('Regen recovered (kJ)', vals)
-
-    vals = [results['energy_center']['net_energy_kJ']]
-    if has_custom: vals.append(results['energy_custom']['net_energy_kJ'])
-    if has_scipy:  vals.append(results['energy_scipy']['net_energy_kJ'])
-    row('Net energy (kJ)', vals)
-
-    vals = [results['energy_center']['energy_per_m']]
-    if has_custom: vals.append(results['energy_custom']['energy_per_m'])
-    if has_scipy:  vals.append(results['energy_scipy']['energy_per_m'])
-    row('Net energy/meter (J/m)', vals)
-
-    # solver agreement
-    if has_custom and has_scipy:
-        ac = results['alpha_custom']
-        asc = results['alpha_scipy']
-        print(f"\n  SOLVER AGREEMENT")
-        print(f"    Mean |alpha_diff|  = {np.mean(np.abs(ac - asc)):.4f}")
-        print(f"    Max  |alpha_diff|  = {np.max(np.abs(ac - asc)):.4f}")
-        print(f"    Correlation        = {np.corrcoef(ac, asc)[0,1]:.6f}")
-
-
-def _print_row(name, vals, has_custom, has_scipy):
-    print(f"  {name:<28} {vals[0]:>12.4f}", end='')
-    i = 1
-    if has_custom: print(f" {vals[i]:>12.4f}", end=''); i += 1
-    if has_scipy:  print(f" {vals[i]:>12.4f}", end=''); i += 1
-    print()
-
-
-# ── Visualization ────────────────────────────────────────────────────────
-
-def plot_full_analysis(track, results, output_path=None):
-    """Generate comprehensive 4-panel figure."""
-    import matplotlib.pyplot as plt
-    from matplotlib.collections import LineCollection
-    from matplotlib.patches import Polygon
-
-    has_custom = 'raceline_custom' in results
-    has_scipy = 'raceline_scipy' in results
-
-    fig, axes = plt.subplots(2, 2, figsize=(18, 14), facecolor='#111')
-    fig.suptitle(f'{track.name} — Racing Line Optimization',
-                 color='white', fontsize=16, fontweight='bold', y=0.98)
-
-    # ── Panel 1: Track with racing lines ──
-    ax = axes[0, 0]
-    ax.set_facecolor('#1a3a15')
-    road = np.vstack([track.left_boundary, track.right_boundary[::-1],
-                      track.left_boundary[0:1]])
-    ax.add_patch(Polygon(road, closed=True, fc='#3a3a3a', ec='none', zorder=1))
-    ax.plot(track.left_boundary[:, 0], track.left_boundary[:, 1],
-            'w-', lw=0.8, alpha=0.5, zorder=3)
-    ax.plot(track.right_boundary[:, 0], track.right_boundary[:, 1],
-            'w-', lw=0.8, alpha=0.5, zorder=3)
-
-    cl = results['centerline']
-    ax.plot(cl[:, 0], cl[:, 1], '-', color='#ffdd00', lw=2.5,
-            label='Centerline', zorder=4, alpha=0.9)
-    if has_custom:
-        rl = results['raceline_custom']
-        ax.plot(rl[:, 0], rl[:, 1], '-', color='#ff3333', lw=1.8,
-                label='Custom (Adam+BFGS)', zorder=5)
-    if has_scipy:
-        rl = results['raceline_scipy']
-        ax.plot(rl[:, 0], rl[:, 1], '--', color='#33ccff', lw=1.8,
-                label='Scipy (SLSQP)', zorder=6, alpha=0.9)
-
-    ax.set_aspect('equal')
-    ax.legend(loc='upper left', fontsize=9, facecolor='#222',
-              edgecolor='#555', labelcolor='white')
-    ax.set_title('Racing Lines', color='white', fontsize=13, fontweight='bold')
-    ax.axis('off')
-
-    # ── Panel 2: Velocity heatmap on racing line ──
-    ax2 = axes[0, 1]
-    ax2.set_facecolor('#1a3a15')
-    ax2.add_patch(Polygon(road.copy(), closed=True, fc='#3a3a3a', ec='none', zorder=1))
-    ax2.plot(track.left_boundary[:, 0], track.left_boundary[:, 1],
-             'w-', lw=0.5, alpha=0.3, zorder=3)
-    ax2.plot(track.right_boundary[:, 0], track.right_boundary[:, 1],
-             'w-', lw=0.5, alpha=0.3, zorder=3)
-
-    # pick best available solver for heatmap
-    if has_scipy:
-        rl_heat = results['raceline_scipy']
-        v_heat = results['velocity_scipy']
-        heat_label = 'Scipy'
-    elif has_custom:
-        rl_heat = results['raceline_custom']
-        v_heat = results['velocity_custom']
-        heat_label = 'Custom'
-    else:
-        rl_heat = cl
-        v_heat = results['velocity_center']
-        heat_label = 'Center'
-
-    # colored line segments by velocity
-    points = rl_heat.reshape(-1, 1, 2)
-    segments = np.concatenate([points[:-1], points[1:]], axis=1)
-    lc = LineCollection(segments, cmap='RdYlGn', linewidth=3, zorder=5)
-    lc.set_array(v_heat[:-1] * 3.6)  # km/h
-    ax2.add_collection(lc)
-    cbar = fig.colorbar(lc, ax=ax2, fraction=0.03, pad=0.02)
-    cbar.set_label('Speed (km/h)', color='white', fontsize=9)
-    cbar.ax.yaxis.set_tick_params(color='white')
-    plt.setp(cbar.ax.yaxis.get_ticklabels(), color='white')
-
-    ax2.set_xlim(ax.get_xlim())
-    ax2.set_ylim(ax.get_ylim())
-    ax2.set_aspect('equal')
-    ax2.set_title(f'Velocity Heatmap ({heat_label})', color='white',
-                  fontsize=13, fontweight='bold')
-    ax2.axis('off')
-
-    # ── Panel 3: Speed profile comparison ──
-    ax3 = axes[1, 0]
-    ax3.set_facecolor('#1a1a1a')
-    n = len(results['velocity_center'])
-    s = np.linspace(0, 100, n)
-
-    ax3.plot(s, results['velocity_center'] * 3.6, '-', color='#ffdd00',
-             lw=1.2, label='Centerline', alpha=0.7)
-    if has_custom:
-        ax3.plot(s, results['velocity_custom'] * 3.6, '-', color='#ff3333',
-                 lw=1.5, label='Custom')
-    if has_scipy:
-        ax3.plot(s, results['velocity_scipy'] * 3.6, '--', color='#33ccff',
-                 lw=1.5, label='Scipy', alpha=0.9)
-
-    ax3.set_xlabel('Track position (%)', color='white', fontsize=10)
-    ax3.set_ylabel('Speed (km/h)', color='white', fontsize=10)
-    ax3.set_title('Speed Profile', color='white', fontsize=13, fontweight='bold')
-    ax3.legend(fontsize=9, facecolor='#222', edgecolor='#555', labelcolor='white')
-    ax3.tick_params(colors='#aaa')
-    for spine in ax3.spines.values():
-        spine.set_color('#555')
-
-    # ── Panel 4: Energy breakdown ──
-    ax4 = axes[1, 1]
-    ax4.set_facecolor('#1a1a1a')
-
-    labels = ['Centerline']
-    drive_e = [results['energy_center']['drive_energy_kJ']]
-    regen_e = [results['energy_center']['regen_energy_kJ']]
-    net_e = [results['energy_center']['net_energy_kJ']]
-    lap_t = [results['energy_center']['lap_time_s']]
-
-    if has_custom:
-        labels.append('Custom')
-        drive_e.append(results['energy_custom']['drive_energy_kJ'])
-        regen_e.append(results['energy_custom']['regen_energy_kJ'])
-        net_e.append(results['energy_custom']['net_energy_kJ'])
-        lap_t.append(results['energy_custom']['lap_time_s'])
-    if has_scipy:
-        labels.append('Scipy')
-        drive_e.append(results['energy_scipy']['drive_energy_kJ'])
-        regen_e.append(results['energy_scipy']['regen_energy_kJ'])
-        net_e.append(results['energy_scipy']['net_energy_kJ'])
-        lap_t.append(results['energy_scipy']['lap_time_s'])
-
-    x_pos = np.arange(len(labels))
-    bar_w = 0.25
-    colors_drive = ['#ffdd00', '#ff3333', '#33ccff'][:len(labels)]
-    colors_regen = ['#88aa00', '#aa5522', '#2299aa'][:len(labels)]
-    colors_net = ['#ccaa00', '#cc2222', '#2288cc'][:len(labels)]
-
-    bars1 = ax4.bar(x_pos - bar_w, drive_e, bar_w, label='Drive',
-                    color=colors_drive, alpha=0.8, edgecolor='white', linewidth=0.5)
-    bars2 = ax4.bar(x_pos, regen_e, bar_w, label='Regen',
-                    color=colors_regen, alpha=0.8, edgecolor='white', linewidth=0.5)
-    bars3 = ax4.bar(x_pos + bar_w, net_e, bar_w, label='Net',
-                    color=colors_net, alpha=0.9, edgecolor='white', linewidth=0.5)
-
-    # lap time annotations on net bars
-    for i, (b, t) in enumerate(zip(bars3, lap_t)):
-        ax4.text(b.get_x() + b.get_width()/2, max(b.get_height(), 0) + 5,
-                 f'{t:.1f}s', ha='center', va='bottom', color='white',
-                 fontsize=8, fontweight='bold')
-
-    ax4.set_xticks(x_pos)
-    ax4.set_xticklabels(labels, color='white', fontsize=10)
-    ax4.set_ylabel('Energy (kJ)', color='white', fontsize=10)
-    ax4.set_title('Energy Breakdown (lap time annotated)',
-                  color='white', fontsize=13, fontweight='bold')
-    ax4.legend(fontsize=9, facecolor='#222', edgecolor='#555', labelcolor='white')
-    ax4.tick_params(colors='#aaa')
-    for spine in ax4.spines.values():
-        spine.set_color('#555')
-
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    if output_path:
-        fig.savefig(output_path, facecolor=fig.get_facecolor(),
-                    dpi=150, bbox_inches='tight')
-        print(f"  Saved: {output_path}")
-    plt.close(fig)
-
-
-def plot_convergence(results, output_path=None):
-    """Plot BFGS convergence history."""
-    import matplotlib.pyplot as plt
-
-    if 'history_custom' not in results:
-        return
-
-    fig, ax = plt.subplots(figsize=(8, 5), facecolor='#111')
-    ax.set_facecolor('#1a1a1a')
-
-    hist = results['history_custom']
-    iters = [h[0] for h in hist]
-    fvals = [h[1] for h in hist]
-    ax.semilogy(iters, fvals, '-', color='#ff3333', lw=2, label='Adam + BFGS')
-
-    if 'result_scipy' in results:
-        # scipy only gives final value
-        ax.axhline(results['result_scipy'].fun, color='#33ccff', ls='--',
-                   lw=1.5, label=f'Scipy final = {results["result_scipy"].fun:.6f}')
-
-    ax.set_xlabel('Iteration', color='white', fontsize=11)
-    ax.set_ylabel('Objective f(alpha)', color='white', fontsize=11)
-    ax.set_title('Convergence: Custom Solver', color='white',
-                 fontsize=13, fontweight='bold')
-    ax.legend(fontsize=10, facecolor='#222', edgecolor='#555', labelcolor='white')
-    ax.tick_params(colors='#aaa')
-    for spine in ax.spines.values():
-        spine.set_color('#555')
-
-    fig.tight_layout()
-    if output_path:
-        fig.savefig(output_path, facecolor=fig.get_facecolor(),
-                    dpi=150, bbox_inches='tight')
-        print(f"  Saved: {output_path}")
-    plt.close(fig)
-
-
-def plot_multi_track_summary(all_tracks, all_results, output_path=None):
-    """Summary figure: 3 tracks side-by-side with key metrics."""
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Polygon
-    from matplotlib.collections import LineCollection
-
-    n_tracks = len(all_tracks)
-    fig, axes = plt.subplots(2, n_tracks, figsize=(7 * n_tracks, 12), facecolor='#111')
-    fig.suptitle('Multi-Track Racing Line Optimization — Summary',
-                 color='white', fontsize=18, fontweight='bold', y=0.98)
-
-    for col, (track, results) in enumerate(zip(all_tracks, all_results)):
-        # top row: racing lines with velocity heatmap
-        ax = axes[0, col]
-        ax.set_facecolor('#1a3a15')
-        road = np.vstack([track.left_boundary, track.right_boundary[::-1],
-                          track.left_boundary[0:1]])
-        ax.add_patch(Polygon(road, closed=True, fc='#3a3a3a', ec='none', zorder=1))
-        ax.plot(track.left_boundary[:, 0], track.left_boundary[:, 1],
-                'w-', lw=0.5, alpha=0.4, zorder=3)
-        ax.plot(track.right_boundary[:, 0], track.right_boundary[:, 1],
-                'w-', lw=0.5, alpha=0.4, zorder=3)
-
-        # centerline
-        cl = results['centerline']
-        ax.plot(cl[:, 0], cl[:, 1], '-', color='#ffdd00', lw=1.5,
-                alpha=0.6, zorder=4)
-
-        # optimized line colored by velocity
-        rl = results.get('raceline_scipy', results.get('raceline_custom', cl))
-        v = results.get('velocity_scipy', results.get('velocity_custom',
-                         results['velocity_center']))
-        points = rl.reshape(-1, 1, 2)
-        segments = np.concatenate([points[:-1], points[1:]], axis=1)
-        lc = LineCollection(segments, cmap='RdYlGn', linewidth=2.5, zorder=5)
-        lc.set_array(v[:-1] * 3.6)
-        ax.add_collection(lc)
-        cbar = fig.colorbar(lc, ax=ax, fraction=0.03, pad=0.01, shrink=0.8)
-        cbar.set_label('km/h', color='#aaa', fontsize=8)
-        cbar.ax.tick_params(labelsize=7, colors='#aaa')
-
-        # metrics text box
-        e = results.get('energy_scipy', results.get('energy_custom',
-                         results['energy_center']))
-        kc = results['curvature_sub_center']
-        ks = results.get('curvature_sub_scipy', results.get('curvature_sub_custom', kc))
-        curv_reduction = (1 - np.sum(ks**2) / np.sum(kc**2)) * 100
-        info = (f"Lap: {e['lap_time_s']:.1f}s | Net E: {e['net_energy_kJ']:.0f} kJ\n"
-                f"Curv. reduction: {curv_reduction:.0f}% | Corr: "
-                f"{np.corrcoef(results['alpha_custom'], results['alpha_scipy'])[0,1]:.3f}")
-        ax.text(0.02, 0.02, info, transform=ax.transAxes, fontsize=7.5,
-                color='white', va='bottom', fontfamily='monospace',
-                bbox=dict(boxstyle='round,pad=0.3', fc='#000000aa', ec='#555'))
-
-        ax.set_aspect('equal')
-        ax.set_title(track.name, color='white', fontsize=13, fontweight='bold')
-        ax.axis('off')
-
-        # bottom row: speed profiles
-        ax2 = axes[1, col]
-        ax2.set_facecolor('#1a1a1a')
-        n = len(results['velocity_center'])
-        s = np.linspace(0, 100, n)
-        ax2.plot(s, results['velocity_center'] * 3.6, '-', color='#ffdd00',
-                 lw=1.0, label='Center', alpha=0.6)
-        if 'velocity_custom' in results:
-            ax2.plot(s, results['velocity_custom'] * 3.6, '-', color='#ff3333',
-                     lw=1.2, label='Custom')
-        if 'velocity_scipy' in results:
-            ax2.plot(s, results['velocity_scipy'] * 3.6, '--', color='#33ccff',
-                     lw=1.2, label='Scipy', alpha=0.8)
-        ax2.set_xlabel('Position (%)', color='white', fontsize=9)
-        ax2.set_ylabel('Speed (km/h)', color='white', fontsize=9)
-        ax2.legend(fontsize=7, facecolor='#222', edgecolor='#555', labelcolor='white')
-        ax2.tick_params(colors='#aaa', labelsize=8)
-        for spine in ax2.spines.values():
-            spine.set_color('#555')
-
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    if output_path:
-        fig.savefig(output_path, facecolor=fig.get_facecolor(),
-                    dpi=150, bbox_inches='tight')
-        print(f"  Saved: {output_path}")
-    plt.close(fig)
-
-
-def curvature_comparison(track, results, n_stations=200, output_path=None):
-    """
-    Compare cumulated curvature: centerline vs optimized lines.
-
-    Uses the subsampled resolution (n_stations) where the optimization
-    was actually performed, to avoid interpolation artifacts.
-    """
-    import matplotlib.pyplot as plt
-
-    # subsample to optimization resolution
-    n_full = len(track.centerline)
-    idx = np.linspace(0, n_full - 1, n_stations, dtype=int)
-    cl = track.centerline[idx]
-    normals = track.normals[idx]
-    widths = track.widths[idx]
-    n = n_stations
-    s_norm = np.linspace(0, 100, n)
-
-    # centerline curvature at this resolution
-    kappa_c = compute_curvature_from_path(cl)
-
-    cum_center = np.cumsum(kappa_c**2)
-    total_center = cum_center[-1]
-
-    lines_kappa = [
-        ('Centerline', kappa_c, '#ffdd00', '-', 2.5),
-    ]
-    lines_cum = [
-        ('Centerline', cum_center, '#ffdd00', '-', 2.5),
-    ]
-
-    totals = {
-        'Centerline': total_center,
-    }
-
-    # numerical solutions at subsampled resolution
-    for alpha_key, label, color, ls in [
-        ('alpha_custom', 'Custom (Adam+BFGS)', '#ff3333', '-'),
-        ('alpha_scipy', 'Scipy (SLSQP)', '#33ccff', '--')
-    ]:
-        if alpha_key not in results:
-            continue
-        alpha = results[alpha_key]
-        rl = alpha_to_raceline(alpha, cl, normals)
-        kappa = compute_curvature_from_path(rl)
-        cum = np.cumsum(kappa**2)
-        lines_kappa.append((label, kappa, color, ls, 1.5))
-        lines_cum.append((label.split(' ')[0], cum, color, ls, 1.5))
-        totals[label.split(' ')[0]] = cum[-1]
-
-    # print comparison
-    print(f"\n  CURVATURE COMPARISON (Sum kappa^2 at {n_stations} stations)")
-    print(f"  {'Method':<25} {'Sum kappa^2':>14} {'vs center':>12}")
-    print(f"  {'─'*51}")
-    for name, total in totals.items():
-        pct_center = (1 - total / total_center) * 100
-        print(f"  {name:<25} {total:>14.6f} {pct_center:>+11.1f}%")
-
-    numericals = {k: v for k, v in totals.items()
-                  if k != 'Centerline'}
-    if numericals:
-        best_num = min(numericals.values())
-        reduction = (1 - best_num / total_center) * 100
-        print(f"\n  Curvature reduction: {reduction:.1f}% vs centerline")
-
-    # ── Plot ──
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), facecolor='#111')
-    fig.suptitle(f'{track.name} — Curvature Comparison ({n_stations} stations)',
-                 color='white', fontsize=15, fontweight='bold', y=0.98)
-
-    ax1.set_facecolor('#1a1a1a')
-    for name, kappa, color, ls, lw in lines_kappa:
-        ax1.plot(s_norm, np.abs(kappa), ls, color=color, lw=lw, label=name, alpha=0.85)
-    ax1.set_xlabel('Track position (%)', color='white', fontsize=10)
-    ax1.set_ylabel('|Curvature|', color='white', fontsize=10)
-    ax1.set_title('Pointwise |Curvature|', color='white', fontsize=12, fontweight='bold')
-    ax1.legend(fontsize=8, facecolor='#222', edgecolor='#555', labelcolor='white')
-    ax1.tick_params(colors='#aaa')
-    for spine in ax1.spines.values():
-        spine.set_color('#555')
-
-    ax2.set_facecolor('#1a1a1a')
-    for name, cum, color, ls, lw in lines_cum:
-        ax2.plot(s_norm, cum, ls, color=color, lw=lw, label=name, alpha=0.85)
-    ax2.set_xlabel('Track position (%)', color='white', fontsize=10)
-    ax2.set_ylabel('Cumulated Sum(kappa^2)', color='white', fontsize=10)
-    ax2.set_title('Cumulated Squared Curvature', color='white', fontsize=12, fontweight='bold')
-    ax2.legend(fontsize=8, facecolor='#222', edgecolor='#555', labelcolor='white')
-    ax2.tick_params(colors='#aaa')
-    for spine in ax2.spines.values():
-        spine.set_color('#555')
-
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    if output_path:
-        fig.savefig(output_path, facecolor=fig.get_facecolor(),
-                    dpi=150, bbox_inches='tight')
-        print(f"  Saved: {output_path}")
-    plt.close(fig)
-
-
-# ── Theoretical bound validation (circular track) ────────────────────────
-
-def theoretical_bound_validation(track, results, n_stations=200, output_path=None):
-    """
-    On a CIRCULAR track (constant curvature), the exact analytical solution
-    for min sum(kappa^2) is known:
-
-        Optimal path = inner boundary at radius R_inner = R - w/2
-        kappa_optimal = 1 / R_inner  (constant everywhere)
-        Sum(kappa^2) = N * kappa_optimal^2
-
-    This validates our numerical solvers against ground truth.
-    """
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Polygon
-
-    # Get track geometry
-    R = np.mean(np.linalg.norm(track.centerline, axis=1))  # average radius
-    w = np.mean(track.widths)  # track half-width (center to boundary)
-    # The optimizer uses bounds [-w/2, w/2] (see solve_custom/solve_scipy)
-    # so the max inward offset is w/2, giving inner radius R - w/2
-    alpha_max = w / 2.0  # optimizer's max offset
-
-    # Exact analytical solution within optimizer bounds
-    R_inner = R - alpha_max
-    kappa_exact = 1.0 / R_inner  # curvature of inner circle
-
-    # At optimization resolution
-    n_full = len(track.centerline)
-    idx = np.linspace(0, n_full - 1, n_stations, dtype=int)
-    cl = track.centerline[idx]
-    normals = track.normals[idx]
-    widths = track.widths[idx]
-
-    kappa_center = compute_curvature_from_path(cl)
-    sum_kappa2_center = np.sum(kappa_center**2)
-
-    # Exact analytical: alpha = -w/2 everywhere (inner boundary of optimizer range)
-    alpha_exact_arr = -widths / 2.0
-    rl_exact = alpha_to_raceline(alpha_exact_arr, cl, normals)
-    kappa_exact_numerical = compute_curvature_from_path(rl_exact)
-    sum_kappa2_exact = np.sum(kappa_exact_numerical**2)
-    # Also compute the theoretical value for reference
-    sum_kappa2_theory = n_stations * kappa_exact**2
-
-    print(f"\n  THEORETICAL VALIDATION — Circular Track")
-    print(f"  Center radius R = {R:.1f} m, track half-width w = {w:.1f} m")
-    print(f"  Optimizer max offset = w/2 = {alpha_max:.1f} m")
-    print(f"  Optimal inner radius = R - w/2 = {R_inner:.1f} m")
-    print(f"  Exact kappa = 1/{R_inner:.1f} = {kappa_exact:.6f}")
-    print(f"  {'─'*60}")
-    print(f"  {'Method':<25} {'Sum kappa^2':>14} {'vs exact':>12} {'% gap':>10}")
-    print(f"  {'─'*60}")
-
-    print(f"  Theoretical N*kappa^2 = {sum_kappa2_theory:.6f} (if curvature were exactly 1/R)")
-    print(f"  Numerical (same path) = {sum_kappa2_exact:.6f}")
-    print()
-
-    rows = [
-        ('Exact (alpha=-w/2)', sum_kappa2_exact),
-        ('Centerline', sum_kappa2_center),
-    ]
-
-    for alpha_key, label in [('alpha_custom', 'Custom (Adam+BFGS)'),
-                              ('alpha_scipy', 'Scipy (SLSQP)')]:
-        if alpha_key in results:
-            alpha = results[alpha_key]
-            rl = alpha_to_raceline(alpha, cl, normals)
-            kappa = compute_curvature_from_path(rl)
-            rows.append((label, np.sum(kappa**2)))
-
-    for name, val in rows:
-        gap = (val / sum_kappa2_exact - 1) * 100
-        print(f"  {name:<25} {val:>14.6f} {val - sum_kappa2_exact:>+12.6f} {gap:>+9.2f}%")
-
-    # Verify that optimal alpha should be -w/2 (push to inside of curve)
-    # For a circle centered at origin traced CCW, normals point outward
-    # so alpha = -w/2 means move inward (to optimizer's bound)
-    alpha_exact = -widths / 2.0  # inner boundary of optimizer's range
-
-    if 'alpha_custom' in results:
-        alpha_c = results['alpha_custom']
-        mean_diff = np.mean(np.abs(alpha_c - alpha_exact))
-        print(f"\n  Custom alpha vs exact (alpha=-w/2):")
-        print(f"    Mean |diff| = {mean_diff:.4f} (should be ~0)")
-        print(f"    Mean alpha_custom = {np.mean(alpha_c):.4f} (exact = {np.mean(alpha_exact):.4f})")
-
-    if 'alpha_scipy' in results:
-        alpha_s = results['alpha_scipy']
-        mean_diff = np.mean(np.abs(alpha_s - alpha_exact))
-        print(f"  Scipy alpha vs exact (alpha=-w/2):")
-        print(f"    Mean |diff| = {mean_diff:.4f} (should be ~0)")
-        print(f"    Mean alpha_scipy = {np.mean(alpha_s):.4f} (exact = {np.mean(alpha_exact):.4f})")
-
-    # ── Plot ──
-    fig, axes = plt.subplots(1, 3, figsize=(20, 7), facecolor='#111')
-    fig.suptitle(f'Circular Track — Theoretical Bound Validation (R={R:.0f}m, w={w:.0f}m)',
-                 color='white', fontsize=15, fontweight='bold', y=0.98)
-
-    # Panel 1: Track with lines
-    ax = axes[0]
-    ax.set_facecolor('#1a3a15')
-    road = np.vstack([track.left_boundary, track.right_boundary[::-1],
-                      track.left_boundary[0:1]])
-    ax.add_patch(Polygon(road, closed=True, fc='#3a3a3a', ec='none', zorder=1))
-    ax.plot(track.left_boundary[:, 0], track.left_boundary[:, 1],
-            'w-', lw=0.8, alpha=0.5, zorder=3)
-    ax.plot(track.right_boundary[:, 0], track.right_boundary[:, 1],
-            'w-', lw=0.8, alpha=0.5, zorder=3)
-
-    # Centerline
-    ax.plot(track.centerline[:, 0], track.centerline[:, 1], '-',
-            color='#ffdd00', lw=2, label='Centerline', zorder=4, alpha=0.8)
-
-    # Exact inner circle (at optimizer's max offset)
-    t_plot = np.linspace(0, 2*np.pi, 500)
-    ax.plot(R_inner * np.cos(t_plot), R_inner * np.sin(t_plot), '-',
-            color='#00ff88', lw=2.5, label=f'Exact optimal (R={R_inner:.1f}m)',
-            zorder=7)
-
-    if 'raceline_custom' in results:
-        rl = results['raceline_custom']
-        ax.plot(rl[:, 0], rl[:, 1], '-', color='#ff3333', lw=1.5,
-                label='Custom', zorder=5)
-    if 'raceline_scipy' in results:
-        rl = results['raceline_scipy']
-        ax.plot(rl[:, 0], rl[:, 1], '--', color='#33ccff', lw=1.5,
-                label='Scipy', zorder=6, alpha=0.9)
-
-    ax.set_aspect('equal')
-    ax.legend(loc='upper left', fontsize=8, facecolor='#222',
-              edgecolor='#555', labelcolor='white')
-    ax.set_title('Racing Lines vs Exact Solution', color='white',
-                 fontsize=12, fontweight='bold')
-    ax.axis('off')
-
-    # Panel 2: Alpha comparison
-    ax2 = axes[1]
-    ax2.set_facecolor('#1a1a1a')
-    s_norm = np.linspace(0, 100, n_stations)
-    ax2.axhline(-alpha_max, color='#00ff88', ls='-', lw=2.5,
-                label=f'Exact alpha = {-alpha_max:.1f}', alpha=0.9)
-    if 'alpha_custom' in results:
-        ax2.plot(s_norm, results['alpha_custom'], '-', color='#ff3333',
-                 lw=1.5, label='Custom', alpha=0.8)
-    if 'alpha_scipy' in results:
-        ax2.plot(s_norm, results['alpha_scipy'], '--', color='#33ccff',
-                 lw=1.5, label='Scipy', alpha=0.8)
-    ax2.axhline(0, color='#ffdd00', ls=':', lw=1, alpha=0.4, label='Centerline (alpha=0)')
-    ax2.axhline(alpha_max, color='white', ls=':', lw=0.5, alpha=0.3)
-    ax2.axhline(-alpha_max, color='white', ls=':', lw=0.5, alpha=0.3)
-    ax2.set_xlabel('Track position (%)', color='white', fontsize=10)
-    ax2.set_ylabel('Lateral offset alpha (m)', color='white', fontsize=10)
-    ax2.set_title('Lateral Offset vs Exact', color='white', fontsize=12, fontweight='bold')
-    ax2.legend(fontsize=8, facecolor='#222', edgecolor='#555', labelcolor='white')
-    ax2.tick_params(colors='#aaa')
-    for spine in ax2.spines.values():
-        spine.set_color('#555')
-
-    # Panel 3: Bar chart — Sum kappa^2
-    ax3 = axes[2]
-    ax3.set_facecolor('#1a1a1a')
-    bar_names = [r[0] for r in rows]
-    bar_vals = [r[1] for r in rows]
-    colors = ['#00ff88', '#88cc44', '#ffdd00', '#ff3333', '#33ccff'][:len(rows)]
-    bars = ax3.barh(range(len(rows)), bar_vals, color=colors, edgecolor='white',
-                    linewidth=0.5, alpha=0.85)
-    ax3.set_yticks(range(len(rows)))
-    ax3.set_yticklabels(bar_names, color='white', fontsize=9)
-    ax3.set_xlabel('Sum(kappa^2)', color='white', fontsize=10)
-    ax3.set_title('Objective Value Comparison', color='white', fontsize=12, fontweight='bold')
-
-    # annotate with gap %
-    for i, (bar, (name, val)) in enumerate(zip(bars, rows)):
-        gap = (val / sum_kappa2_exact - 1) * 100
-        label = f'{val:.4f} ({gap:+.1f}%)' if abs(gap) > 0.01 else f'{val:.4f} (exact)'
-        ax3.text(bar.get_width() + 0.0002, bar.get_y() + bar.get_height()/2,
-                 label, va='center', color='white', fontsize=8)
-
-    ax3.tick_params(colors='#aaa')
-    for spine in ax3.spines.values():
-        spine.set_color('#555')
-
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    if output_path:
-        fig.savefig(output_path, facecolor=fig.get_facecolor(),
-                    dpi=150, bbox_inches='tight')
-        print(f"  Saved: {output_path}")
-    plt.close(fig)
-
-
-# ── Main ─────────────────────────────────────────────────────────────────
-
-if __name__ == '__main__':
-    import sys
-    import os
-    sys.path.insert(0, os.path.dirname(__file__))
-    from track import get_track
-
-    fig_dir = os.path.join(os.path.dirname(__file__), '..', 'figures')
-    os.makedirs(fig_dir, exist_ok=True)
-
-    # ── Part 0: Theoretical validation on circular track ──
-    print(f"\n{'#'*70}")
-    print(f"  THEORETICAL VALIDATION: Circular Track")
-    print(f"{'#'*70}")
-    circle_track = get_track('circle')
-    circle_results = optimize_racing_line(circle_track, n_stations=200, solver='both')
-    print_comparison(circle_track, circle_results)
-    theoretical_bound_validation(circle_track, circle_results,
-                                  output_path=os.path.join(fig_dir, 'theoretical_validation.png'))
-    curvature_comparison(circle_track, circle_results,
-                          output_path=os.path.join(fig_dir, 'analytical_circle.png'))
-
-    # ── Part 1: Optimization on all tracks ──
-    track_names = ['oval', 'monaco', 'hairpin', 'complex']
-    all_tracks = []
-    all_results = []
-
-    for track_name in track_names:
-        print(f"\n{'#'*70}")
-        print(f"  TRACK: {track_name}")
-        print(f"{'#'*70}")
-
-        track = get_track(track_name)
-        results = optimize_racing_line(track, n_stations=200, solver='both')
-        print_comparison(track, results)
-
-        # analytical comparison
-        curvature_comparison(track, results,
-                              output_path=os.path.join(fig_dir, f'analytical_{track_name}.png'))
-
-        if track_name != 'oval':  # full analysis for non-trivial tracks
-            plot_full_analysis(track, results,
-                               output_path=os.path.join(fig_dir, f'analysis_{track_name}.png'))
-        plot_convergence(results,
-                         output_path=os.path.join(fig_dir, f'convergence_{track_name}.png'))
-
-        all_tracks.append(track)
-        all_results.append(results)
-
-    # multi-track summary (skip oval for the summary)
-    plot_multi_track_summary(all_tracks[1:], all_results[1:],
-                             output_path=os.path.join(fig_dir, 'summary_all_tracks.png'))
-    print("\nAll tracks processed.")
