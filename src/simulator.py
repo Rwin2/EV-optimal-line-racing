@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from track import get_track, Track, TRACK_GENERATORS
 from car import BicycleModel, CarState, CarParams
-from controller import PurePursuitController, generate_racing_line
+from controller import PurePursuitController, ILQRController, generate_racing_line
 
 # ── Color palette ────────────────────────────────────────────────────────
 ASPHALT      = '#3a3a3a'
@@ -46,12 +46,13 @@ CURB_WHITE   = '#eeeeee'
 LINE_WHITE   = '#cccccc'
 BACKGROUND   = '#1a3a15'
 
-CONTROLLER_CONFIGS = {
-    'center':     {'name': 'Center-Line',  'line': 'center', 'speed': 'curvature',     'color': '#3399ff'},
-    'optimal':    {'name': 'Min-Curvature','line': 'minimum_curvature', 'speed': 'curvature', 'color': '#ff3333'},
-    'aggressive': {'name': 'Aggressive',   'line': 'minimum_curvature', 'speed': 'aggressive','color': '#ffcc00'},
-    'eco':        {'name': 'Eco-Save',     'line': 'center', 'speed': 'energy_saving', 'color': '#33cc66'},
-    'constant':   {'name': 'Constant-Speed','line': 'center', 'speed': 'constant',    'color': '#cc66ff'},
+RACE_STRATEGIES = {
+    'center':     {'name': 'Center-Line',   'line': 'center',       'speed': 'curvature',    'color': '#3399ff', 'ctrl': 'pursuit'},
+    'optimal':    {'name': 'Min-LapTime',   'line': 'min_laptime',  'speed': 'aggressive',   'color': '#ff3333', 'ctrl': 'pursuit'},
+    'aggressive': {'name': 'Aggressive',    'line': 'min_laptime',  'speed': 'aggressive',   'color': '#ffcc00', 'ctrl': 'pursuit'},
+    'eco':        {'name': 'Eco-Save',      'line': 'center',       'speed': 'energy_saving','color': '#33cc66', 'ctrl': 'pursuit'},
+    'constant':   {'name': 'Constant-Speed','line': 'center',       'speed': 'constant',     'color': '#cc66ff', 'ctrl': 'pursuit'},
+    'ilqr':       {'name': 'TV-LQR',        'line': 'min_laptime',  'speed': 'aggressive',   'color': '#00ff88', 'ctrl': 'ilqr'},
 }
 
 
@@ -67,7 +68,7 @@ def draw_track(ax, track: Track, show_racing_lines=None):
 
     # Grass background
     ax.add_patch(patches.Rectangle(
-        (cx.min()-pad, cy.min()-pad), cx.ptp()+2*pad, cy.ptp()+2*pad,
+        (cx.min()-pad, cy.min()-pad), np.ptp(cx)+2*pad, np.ptp(cy)+2*pad,
         facecolor=GRASS, zorder=0))
 
     # Grass texture
@@ -455,8 +456,8 @@ def main():
     parser = argparse.ArgumentParser(description='EV Racing Simulator')
     parser.add_argument('--track', default='complex', choices=list(TRACK_GENERATORS.keys()),
                         help='Track to race on')
-    parser.add_argument('--controllers', nargs='+', default=['center', 'optimal', 'aggressive', 'eco'],
-                        choices=list(CONTROLLER_CONFIGS.keys()), help='Controllers to race')
+    parser.add_argument('--strategies', nargs='+', default=['center', 'optimal', 'aggressive', 'eco'],
+                        choices=list(RACE_STRATEGIES.keys()), help='Race strategies to compare')
     parser.add_argument('--time', type=float, default=120.0, help='Max simulation time (seconds)')
     parser.add_argument('--laps', type=int, default=1, help='Stop after N laps')
     parser.add_argument('--dt', type=float, default=0.02, help='Time step')
@@ -477,8 +478,8 @@ def main():
     track = get_track(args.track)
     print(f"  {track.name} | {track.length:.0f} m | {len(track.centerline)} pts")
 
-    # Controllers
-    print(f"\n[2/5] Setting up {len(args.controllers)} controllers...")
+    # Race strategies
+    print(f"\n[2/5] Setting up {len(args.strategies)} race strategies...")
     tangent = track.centerline[1] - track.centerline[0]
     heading = np.arctan2(tangent[1], tangent[0])
     params = CarParams()
@@ -486,19 +487,26 @@ def main():
     controllers, car_models, initial_states = [], [], []
     car_names, car_colors, racing_lines, ctrl_keys = [], [], [], []
 
-    for i, key in enumerate(args.controllers):
-        cfg = CONTROLLER_CONFIGS[key]
-        rl = generate_racing_line(track, mode=cfg['line'])
-        ctrl = PurePursuitController(track, racing_line=rl, params=params, speed_mode=cfg['speed'])
+    line_cache = {}  # avoid recomputing the same racing line twice
+    for i, key in enumerate(args.strategies):
+        cfg = RACE_STRATEGIES[key]
+        if cfg['line'] not in line_cache:
+            line_cache[cfg['line']] = generate_racing_line(track, mode=cfg['line'])
+        rl, v_profile = line_cache[cfg['line']]
+        if cfg.get('ctrl') == 'ilqr':
+            ctrl = ILQRController(track, racing_line=rl, v_profile=v_profile, params=params)
+        else:
+            ctrl = PurePursuitController(track, racing_line=rl, params=params,
+                                         speed_mode=cfg['speed'], v_profile=v_profile)
         controllers.append(ctrl)
         car_models.append(BicycleModel(params))
-        start_pos = track.centerline[0] + (i - len(args.controllers)/2) * 2.5 * track.normals[0]
+        start_pos = track.centerline[0] + (i - len(args.strategies)/2) * 2.5 * track.normals[0]
         initial_states.append(CarState(x=start_pos[0], y=start_pos[1], psi=heading, vx=12.0, SOC=1.0))
         car_names.append(cfg['name'])
         car_colors.append(cfg['color'])
         racing_lines.append(rl)
         ctrl_keys.append(key)
-        print(f"  [{cfg['name']}] line={cfg['line']}, speed={cfg['speed']}")
+        print(f"  [{cfg['name']}] line={cfg['line']}, speed_tracking={cfg['speed']}")
 
     # Static figure only mode
     if args.figure_only:
@@ -507,7 +515,7 @@ def main():
         states = [CarState(x=track.centerline[len(track.centerline)//4, 0],
                            y=track.centerline[len(track.centerline)//4, 1],
                            psi=heading)]
-        center_rl = generate_racing_line(track, mode="center")
+        center_rl, _ = generate_racing_line(track, mode="center")
         render_static_frame(track, states, ['EV'], ['#3399ff'],
                             racing_lines=[(center_rl, '#3399ff', 'Racing Line')],
                             output_path=str(fig_dir / 'track_with_raceline.png'))

@@ -163,6 +163,98 @@ def generate_complex_circuit(n_points=600, track_width=10, seed=42):
     return Track(centerline, left, right, widths, normals, s, total_len, "Grand Prix Circuit")
 
 
+def generate_hairpin_chicane(n_points=600, track_width=14):
+    """Track with exaggerated hairpins and chicanes: long straights into very tight turns."""
+    control_points = np.array([
+        # long straight
+        [0, 0],
+        [100, 0],
+        [200, 0],
+        # tight hairpin right
+        [240, -10],
+        [250, -40],
+        [230, -60],
+        [200, -50],
+        # straight back
+        [150, -55],
+        [50, -60],
+        # chicane (quick S)
+        [20, -70],
+        [0, -100],
+        [20, -130],
+        # another straight
+        [50, -140],
+        [150, -145],
+        # very tight hairpin left
+        [190, -155],
+        [200, -190],
+        [180, -210],
+        [150, -200],
+        # long return straight
+        [100, -195],
+        [0, -180],
+        [-50, -150],
+        # wide sweeper back to start
+        [-70, -100],
+        [-60, -50],
+        [-40, -20],
+    ])
+    centerline = _smooth_closed_curve(control_points, n_points)
+    left, right, widths, normals, s, total_len = _compute_track_geometry(centerline, track_width)
+    return Track(centerline, left, right, widths, normals, s, total_len, "Hairpin & Chicane Circuit")
+
+
+def generate_monaco_style(n_points=800, track_width=18):
+    """Sharp-cornered circuit: long straights into tight 90-degree bends, wide track."""
+    control_points = np.array([
+        # bottom straight
+        [0, 0],
+        [100, 0],
+        [200, 0],
+        # sharp right turn
+        [250, 0],
+        [260, -10],
+        [260, -30],
+        # right straight going up
+        [260, -80],
+        [260, -140],
+        # sharp right + chicane at top
+        [260, -180],
+        [250, -195],
+        [230, -200],
+        [200, -195],
+        [180, -200],
+        [160, -195],
+        # top straight going left
+        [120, -190],
+        [60, -190],
+        # sharp left turn down
+        [10, -190],
+        [0, -180],
+        [0, -160],
+        # left straight going down
+        [0, -120],
+        [0, -60],
+        # back to start
+        [0, -20],
+    ])
+    centerline = _smooth_closed_curve(control_points, n_points)
+    left, right, widths, normals, s, total_len = _compute_track_geometry(centerline, track_width)
+    return Track(centerline, left, right, widths, normals, s, total_len, "Sharp Corner Circuit")
+
+
+def generate_circle(n_points=500, radius=100, track_width=15):
+    """Generate a perfect circular track. Used for theoretical bound validation:
+    on a circle of radius R with half-width w, the exact optimal racing line
+    is the inner boundary at radius R - w, giving kappa = 1/(R - w)."""
+    t = np.linspace(0, 2*np.pi, n_points, endpoint=False)
+    x = radius * np.cos(t)
+    y = radius * np.sin(t)
+    centerline = np.column_stack([x, y])
+    left, right, widths, normals, s, total_len = _compute_track_geometry(centerline, track_width)
+    return Track(centerline, left, right, widths, normals, s, total_len, "Circular Track")
+
+
 def generate_monza_style(n_points=600, track_width=11):
     """Generate a Monza-inspired circuit: long straights with tight chicanes."""
     control_points = np.array([
@@ -196,8 +288,11 @@ def generate_monza_style(n_points=600, track_width=11):
 # Registry of available tracks
 TRACK_GENERATORS = {
     "oval": generate_oval,
+    "circle": generate_circle,
     "figure_eight": generate_figure_eight,
     "complex": generate_complex_circuit,
+    "hairpin": generate_hairpin_chicane,
+    "monaco": generate_monaco_style,
     "monza": generate_monza_style,
 }
 
