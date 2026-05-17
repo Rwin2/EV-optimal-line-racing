@@ -43,7 +43,7 @@ Each LP sub-problem is solved with a simplex algorithm that we implemented from 
 Once the optimal racing line and speed profile are computed offline, the remaining challenge is to track this reference with a vehicle that has nonlinear dynamics and limited actuators. We formulate this as a trajectory tracking problem using an iterative Linear Quadratic Regulator (iLQR). The vehicle is modeled as a planar bicycle with state $\mathbf{s} = [x, y, \psi, v_x, v_y, \omega]$ and control $\mathbf{u} = [\delta, F_{\text{drive}}]$. We convert the SCP output into a time-indexed reference $(\bar{\mathbf{s}}_k, \bar{\mathbf{u}}_k)$, linearize the dynamics at each point, and run a backward Riccati recursion to obtain time-varying gains $Y_k$ and offsets $y_k$. This recursion follows from the first-order optimality conditions (KKT) of the quadratic tracking cost subject to the linearized dynamics. Online, the controller applies $\mathbf{u}_k = \bar{\mathbf{u}}_k + Y_k(\mathbf{s}_k - \bar{\mathbf{s}}_k) + y_k$. On the test circuit, the offline plan predicts \textbf{26.9\,s} and the closed-loop simulation achieves \textbf{27.0\,s}, confirming tracking consistency.
 
 \vspace{-0.05in}
-\paragraph{Remaining Work.} Incorporate battery energy into the objective and trace the Pareto front between lap time and $\Delta SOC$; add stochastic grip perturbations to evaluate robust strategies; benchmark across multiple track geometries.
+\paragraph{Remaining Work.} Incorporate battery energy consumption into the objective to formulate a multiobjective optimization problem and trace the Pareto front between lap time and energy usage; study optimization under uncertainty by adding stochastic perturbations to tire grip; benchmark across multiple track geometries.
 
 
 \end{document}
