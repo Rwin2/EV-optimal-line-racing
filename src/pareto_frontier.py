@@ -23,7 +23,7 @@ import matplotlib.ticker as mticker
 sys.path.insert(0, os.path.dirname(__file__))
 
 from track import get_track
-from optimizer import SpeedProfileOptimizer
+from optimizer_ipopt import SpeedProfileOptimizer
 
 
 # ---------------------------------------------------------------------------
