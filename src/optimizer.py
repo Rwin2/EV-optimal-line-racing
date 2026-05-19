@@ -22,7 +22,6 @@ References:
 """
 
 import numpy as np
-from scipy.optimize import minimize as scipy_minimize
 from scipy.ndimage import uniform_filter1d
 
 
@@ -60,243 +59,6 @@ def compute_curvature_from_path(path):
     speed = np.maximum(speed, 1e-10)
     kappa = (dx * ddy - dy * ddx) / speed**3
     return kappa
-
-
-# ── Objective functions ──────────────────────────────────────────────────
-
-def objective_curvature(alpha, centerline, normals, car_params=None):
-    """f(alpha) = sum of squared curvature + tiny smoothness regularizer."""
-    path = alpha_to_raceline(alpha, centerline, normals)
-    kappa = compute_curvature_from_path(path)
-    f_curv = np.sum(kappa**2)
-    dalpha = np.diff(alpha, append=alpha[0])
-    f_smooth = 1e-5 * np.sum(dalpha**2)
-    return f_curv + f_smooth
-
-
-def objective_laptime(alpha, centerline, normals, car_params):
-    """f(alpha) = lap time = sum(ds / v), where v comes from velocity profile."""
-    path = alpha_to_raceline(alpha, centerline, normals)
-    kappa = compute_curvature_from_path(path)
-    ds = np.linalg.norm(np.diff(path, axis=0, append=path[0:1]), axis=1)
-    v = compute_velocity_profile(path, kappa, car_params, ds)
-    lap_time = np.sum(ds / np.maximum(v, 0.5))
-    # small smoothness regularizer to help convergence
-    dalpha = np.diff(alpha, append=alpha[0])
-    return lap_time + 1e-4 * np.sum(dalpha**2)
-
-
-def objective_energy(alpha, centerline, normals, car_params):
-    """f(alpha) = net energy consumption (drive - regen)."""
-    path = alpha_to_raceline(alpha, centerline, normals)
-    kappa = compute_curvature_from_path(path)
-    ds = np.linalg.norm(np.diff(path, axis=0, append=path[0:1]), axis=1)
-    v = compute_velocity_profile(path, kappa, car_params, ds)
-    energy = compute_energy(path, v, car_params, ds)
-    dalpha = np.diff(alpha, append=alpha[0])
-    return energy['net_energy_kJ'] + 1e-4 * np.sum(dalpha**2)
-
-
-# Map of available objectives
-OBJECTIVES = {
-    'curvature': objective_curvature,
-    'laptime': objective_laptime,
-    'energy': objective_energy,
-}
-
-
-def gradient(alpha, centerline, normals, car_params=None, obj_func=None, eps=1e-5):
-    """Finite-difference gradient of the objective."""
-    if obj_func is None:
-        obj_func = objective_curvature
-    n = len(alpha)
-    f0 = obj_func(alpha, centerline, normals, car_params)
-    grad = np.zeros(n)
-    for i in range(n):
-        alpha_p = alpha.copy()
-        alpha_p[i] += eps
-        grad[i] = (obj_func(alpha_p, centerline, normals, car_params) - f0) / eps
-    return grad
-
-
-# ── Projected Adam (Alg 5.8 with bound projection) ──────────────────────
-
-def projected_adam(f, grad_f, x0, lb, ub, max_iter=3000, lr=0.5,
-                   b1=0.9, b2=0.999, tol=1e-12):
-    """
-    Vanilla Adam optimizer (Alg 5.8) with projection onto box [lb, ub].
-    Cosine annealing learning rate schedule.
-    No budget constraints — runs until convergence or max_iter.
-    """
-    x = np.clip(x0.copy(), lb, ub)
-    ea = 1e-8
-    mv = np.zeros_like(x)
-    ms = np.zeros_like(x)
-    history = [(0, f(x))]
-
-    for t in range(1, max_iter + 1):
-        g = grad_f(x)
-
-        # Adam moment updates (Alg 5.8)
-        mv = b1 * mv + (1 - b1) * g
-        ms = b2 * ms + (1 - b2) * g**2
-        m_hat = mv / (1 - b1**t)
-        v_hat = ms / (1 - b2**t)
-
-        # cosine annealing learning rate
-        lr_t = lr * 0.5 * (1 + np.cos(np.pi * t / max_iter))
-        lr_t = max(lr_t, lr * 0.01)  # floor
-
-        # Adam step + projection
-        x -= lr_t * m_hat / (np.sqrt(v_hat) + ea)
-        x = np.clip(x, lb, ub)
-
-        # log every 50 iters (cheap — just one f eval)
-        if t % 50 == 0:
-            fval = f(x)
-            history.append((t, fval))
-
-            # convergence check on recent window
-            if len(history) > 10:
-                recent = [h[1] for h in history[-10:]]
-                if max(recent) - min(recent) < tol:
-                    break
-
-    return x, history
-
-
-# ── Projected BFGS (Alg 6.6 with bound projection) ──────────────────────
-
-def projected_bfgs(f, grad_f, x0, lb, ub, max_iter=500, tol=1e-8):
-    """
-    BFGS quasi-Newton method (Alg 6.6) with projection onto box [lb, ub].
-    Used for fine-tuning after Adam warm-start.
-    """
-    n = len(x0)
-    x = np.clip(x0, lb, ub)
-    Q = np.eye(n)
-    g = grad_f(x)
-    f_best = f(x)
-    x_best = x.copy()
-    history = [(0, f_best)]
-
-    for k in range(1, max_iter + 1):
-        pg = x - np.clip(x - g, lb, ub)
-        if np.linalg.norm(pg) < tol:
-            break
-
-        d = -Q @ g
-
-        # projected backtracking line search
-        alpha = 1.0
-        fx = f(x)
-        for _ in range(40):
-            x_trial = np.clip(x + alpha * d, lb, ub)
-            if f(x_trial) <= fx + 1e-4 * g @ (x_trial - x):
-                break
-            alpha *= 0.5
-        x_new = np.clip(x + alpha * d, lb, ub)
-        g_new = grad_f(x_new)
-
-        f_new = f(x_new)
-        if f_new < f_best:
-            f_best = f_new
-            x_best = x_new.copy()
-
-        # BFGS inverse Hessian update (eq 6.26)
-        s = x_new - x
-        y = g_new - g
-        sy = s @ y
-        if sy > 1e-12:
-            rho_k = 1.0 / sy
-            I = np.eye(n)
-            V = I - rho_k * np.outer(s, y)
-            Q = V @ Q @ V.T + rho_k * np.outer(s, s)
-
-        x = x_new
-        g = g_new
-        history.append((k, f_new))
-
-    return x_best, history
-
-
-
-
-# ── Solvers ──────────────────────────────────────────────────────────────
-
-def solve_scipy(centerline, normals, widths, alpha0=None,
-                obj='curvature', car_params=None):
-    """Solve racing line optimization using scipy SLSQP."""
-    n = len(centerline)
-    if alpha0 is None:
-        alpha0 = np.zeros(n)
-
-    half_w = widths  # widths is already center-to-boundary (half-width)
-    bounds = [(-hw, hw) for hw in half_w]
-    obj_func = OBJECTIVES[obj]
-
-    def f(alpha):
-        return obj_func(alpha, centerline, normals, car_params)
-
-    def g(alpha):
-        return gradient(alpha, centerline, normals, car_params, obj_func)
-
-    result = scipy_minimize(f, alpha0, jac=g, method='SLSQP',
-                            bounds=bounds,
-                            options={'maxiter': 2000, 'ftol': 1e-12, 'disp': False})
-    return result.x, result
-
-
-def solve_custom(centerline, normals, widths, alpha0=None,
-                 obj='curvature', car_params=None):
-    """
-    Two-phase custom solver:
-      Phase 1: Projected Adam (robust global convergence)
-      Phase 2: Projected BFGS (fast local refinement)
-
-    Same iteration count for all objectives. For laptime/energy,
-    warm-starts from the min-curvature solution (which is cheap to compute).
-    """
-    n = len(centerline)
-    if alpha0 is None:
-        alpha0 = np.zeros(n)
-
-    half_w = widths  # widths is already center-to-boundary (half-width)
-    lb = -half_w
-    ub = half_w
-    obj_func = OBJECTIVES[obj]
-
-    def f(alpha):
-        return obj_func(alpha, centerline, normals, car_params)
-
-    def g(alpha):
-        return gradient(alpha, centerline, normals, car_params, obj_func)
-
-    # For expensive objectives, warm-start from curvature if starting from zero
-    if obj in ('laptime', 'energy') and np.allclose(alpha0, 0):
-        print(f"    [warm-start] solving curvature first...")
-        alpha_warm, _ = solve_custom(centerline, normals, widths,
-                                      alpha0, obj='curvature', car_params=car_params)
-        alpha0 = alpha_warm
-
-    # Same iterations for all objectives
-    adam_iter, bfgs_iter = 1500, 300
-    # Lower LR for non-smooth objectives (velocity profile has kinks)
-    lr = 0.1 if obj in ('laptime', 'energy') else 0.3
-
-    # Phase 1: Vanilla Adam
-    alpha_adam, hist_adam = projected_adam(f, g, alpha0, lb, ub,
-                                          max_iter=adam_iter, lr=lr)
-
-    # Phase 2: BFGS refinement
-    alpha_opt, hist_bfgs = projected_bfgs(f, g, alpha_adam, lb, ub,
-                                           max_iter=bfgs_iter, tol=1e-10)
-
-    # merge histories
-    offset = hist_adam[-1][0] if hist_adam else 0
-    history = hist_adam + [(h[0] + offset, h[1]) for h in hist_bfgs]
-
-    return alpha_opt, history
 
 
 # ── SCP: Joint path+speed optimization ───────────────────────────────────
@@ -520,6 +282,156 @@ def solve_scp(centerline, normals, widths, car_params, alpha0=None,
     return alpha, v, history
 
 
+# ── SCP Pareto: speed-only optimization with time+energy objective ───────
+
+def solve_scp_pareto(kappa, ds, car_params, v0, w_time=1.0, w_energy=1.0,
+                     T_ref=1.0, E_ref=1.0, rho=5.0, eps=1e-3, max_iters=15):
+    """
+    Speed-only SCP for the Pareto front: optimize v on a FIXED raceline.
+
+    Same constraints as solve_scp (cornering, accel, braking), same Simplex
+    LP solver, but the objective is the weighted time+energy tradeoff:
+
+        J = w_time * T(v)/T_ref  +  w_energy * E(v)/E_ref
+
+    where T = Σ(ds_i/v_i) and E is the net electrical energy (drive - regen).
+
+    Args:
+        kappa: (n,) curvature at each station (from vanilla SCP)
+        ds:    (n,) arc-length increments (from vanilla SCP raceline)
+        car_params: CarParams
+        v0:    (n,) initial speed profile (from vanilla SCP)
+        w_time, w_energy: Pareto weights
+        T_ref, E_ref: normalization constants
+    Returns:
+        v_opt: (n,) optimized speed profile
+    """
+    from simplex import solve_lp
+    import time as _time
+
+    n = len(kappa)
+    p = car_params
+    g = 9.81
+    rho_init = rho
+    a_lat = p.mu * g * 0.85
+    a_lon = min(p.F_drive_max / p.mass, p.mu * g * 0.6)
+    a_brk = min(p.F_brake_max / p.mass, p.mu * g * 0.9)
+
+    v = v0.copy()
+    abs_kappa = np.abs(kappa)
+    J_prev = np.inf
+
+    for it in range(max_iters):
+        v_next = np.roll(v, -1)
+        v_safe = np.maximum(v, 1e-3)
+
+        # ── Current objectives ──
+        dt_seg = ds / v_safe
+        T = np.sum(dt_seg)
+
+        # Energy model (same as compute_energy)
+        dv = np.roll(v, -1) - np.roll(v, 1)  # centered differences
+        a_long = dv / (2.0 * np.maximum(dt_seg, 1e-6))
+        F_drag = 0.5 * p.rho * p.C_d * p.A_front * v**2
+        F_roll = p.C_roll * p.mass * g
+        F_tract = p.mass * a_long + F_drag + F_roll
+        P_mech = F_tract * v
+        P_drive = np.maximum(P_mech, 0.0)
+        P_regen = np.minimum(P_mech, 0.0)
+        E = np.sum((P_drive / p.eta_motor + P_regen * p.eta_regen) * dt_seg)
+
+        J = w_time * T / T_ref + w_energy * E / E_ref
+
+        dJ = abs(J_prev - J)
+        if it > 0 and dJ < eps:
+            break
+        J_prev = J
+
+        # ── Linearized objective gradient: ∂J/∂v ──
+        # ∂T/∂v_i = -ds_i / v_i²
+        dT_dv = -ds / v_safe**2
+
+        # ∂E/∂v_i (numerical, small n so cheap)
+        eps_fd = 1e-3
+        dE_dv = np.zeros(n)
+        for i in range(n):
+            vp = v.copy(); vp[i] += eps_fd
+            vp_safe = np.maximum(vp, 1e-3)
+            dt_p = ds / vp_safe
+            dv_p = np.roll(vp, -1) - np.roll(vp, 1)
+            a_p = dv_p / (2.0 * np.maximum(dt_p, 1e-6))
+            Fd_p = 0.5 * p.rho * p.C_d * p.A_front * vp**2
+            Fr_p = p.C_roll * p.mass * g
+            Pm_p = (p.mass * a_p + Fd_p + Fr_p) * vp
+            Pd_p = np.maximum(Pm_p, 0.0)
+            Pr_p = np.minimum(Pm_p, 0.0)
+            E_p = np.sum((Pd_p / p.eta_motor + Pr_p * p.eta_regen) * dt_p)
+            dE_dv[i] = (E_p - E) / eps_fd
+
+        c_obj = w_time / T_ref * dT_dv + w_energy / E_ref * dE_dv
+
+        # ── Linearized constraints (v-only, α is fixed) ──
+        # Same as vanilla SCP but without α columns
+
+        # Cornering: c_c_i = a_lat - v_i² |κ_i| >= 0
+        dc_c_dv = np.diag(-2.0 * v * abs_kappa)
+        c_c0 = a_lat - v**2 * abs_kappa
+
+        # Acceleration: c_a_i = v_i² + 2*a_lon*ds_i - v_{i+1}² >= 0
+        dc_a_dv = np.zeros((n, n))
+        for i in range(n):
+            ip1 = (i + 1) % n
+            dc_a_dv[i, i]   =  2.0 * v[i]
+            dc_a_dv[i, ip1] = -2.0 * v_next[i]
+        c_a0 = v**2 + 2.0 * a_lon * ds - v_next**2
+
+        # Braking: c_b_i = v_{i+1}² + 2*a_brk*ds_i - v_i² >= 0
+        dc_b_dv = np.zeros((n, n))
+        for i in range(n):
+            ip1 = (i + 1) % n
+            dc_b_dv[i, i]   = -2.0 * v[i]
+            dc_b_dv[i, ip1] =  2.0 * v_next[i]
+        c_b0 = v_next**2 + 2.0 * a_brk * ds - v**2
+
+        # Stack: -J·Δv ≤ c0  (constraint c >= 0 → -∂c/∂v · Δv ≤ c0)
+        A_ub = np.vstack([-dc_c_dv, -dc_a_dv, -dc_b_dv])
+        b_ub = np.concatenate([c_c0, c_a0, c_b0])
+
+        # Bounds: trust region ∩ variable bounds
+        lb_v = np.maximum(-rho, 1.0 - v)
+        ub_v = np.minimum( rho, p.v_max - v)
+
+        # Solve LP with Simplex
+        delta = solve_lp(c_obj, A_ub, b_ub, lb_v, ub_v)
+
+        max_viol = float(np.max(np.maximum(A_ub @ delta - b_ub, 0)))
+        if max_viol > 0.5:
+            delta *= min(0.5 / max(max_viol, 1e-6), 1.0)
+            rho = max(rho * 0.5, 0.1)
+
+        v_new = np.clip(v + delta, 1.0, p.v_max)
+
+        # Evaluate actual objective
+        dt_new = ds / np.maximum(v_new, 1e-3)
+        T_new = np.sum(dt_new)
+        dv_new = np.roll(v_new, -1) - np.roll(v_new, 1)
+        a_new = dv_new / (2.0 * np.maximum(dt_new, 1e-6))
+        Fd_new = 0.5 * p.rho * p.C_d * p.A_front * v_new**2
+        Pm_new = (p.mass * a_new + Fd_new + p.C_roll * p.mass * g) * v_new
+        E_new = np.sum((np.maximum(Pm_new, 0) / p.eta_motor +
+                        np.minimum(Pm_new, 0) * p.eta_regen) * dt_new)
+        J_new = w_time * T_new / T_ref + w_energy * E_new / E_ref
+
+        if J_new < J:
+            v = v_new
+            rho = min(rho * 1.2, rho_init)
+        else:
+            v = v_new
+            rho = max(rho * 0.5, 0.1)
+
+    return v
+
+
 # ── Stage 2: Velocity profile optimization ───────────────────────────────
 
 def compute_velocity_profile(path, kappa, car_params, ds=None):
@@ -682,27 +594,21 @@ def optimize_racing_line(track, n_stations=200, solver='both', obj='curvature'):
     car = CarParams()
     results = {'objective': obj}
 
-    # Curvature warm-start for laptime/energy decoupled solvers and SCP
-    if obj in ('laptime', 'energy') or solver == 'scp':
-        print(f"    [pipeline] warm-starting from curvature solution...")
-        alpha0, _ = solve_scipy(centerline, normals, widths,
-                                 alpha0=np.zeros(n_stations),
-                                 obj='curvature', car_params=car)
-    else:
-        alpha0 = np.zeros(n_stations)
+    # Warm-start: minimize curvature with scipy SLSQP to get a good initial path
+    print(f"    [pipeline] warm-starting from curvature solution...")
+    half_w = widths
+    bounds = [(-hw, hw) for hw in half_w]
 
-    # Decoupled solvers (path only, then velocity profile separately)
-    if solver in ('custom', 'both'):
-        alpha_c, hist_c = solve_custom(centerline, normals, widths, alpha0.copy(),
-                                        obj=obj, car_params=car)
-        results['alpha_custom'] = alpha_c
-        results['history_custom'] = hist_c
+    def _curv_obj(alpha):
+        path = alpha_to_raceline(alpha, centerline, normals)
+        kappa = compute_curvature_from_path(path)
+        dalpha = np.diff(alpha, append=alpha[0])
+        return np.sum(kappa**2) + 1e-5 * np.sum(dalpha**2)
 
-    if solver in ('scipy', 'both'):
-        alpha_s, res_s = solve_scipy(centerline, normals, widths, alpha0.copy(),
-                                      obj=obj, car_params=car)
-        results['alpha_scipy'] = alpha_s
-        results['result_scipy'] = res_s
+    from scipy.optimize import minimize as scipy_minimize
+    res_warm = scipy_minimize(_curv_obj, np.zeros(n_stations), method='SLSQP',
+                              bounds=bounds, options={'maxiter': 2000, 'ftol': 1e-12, 'disp': False})
+    alpha0 = res_warm.x
 
     # SCP: joint path+speed optimizer (always minimizes lap time)
     if solver == 'scp':

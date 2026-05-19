@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from track import get_track
 from optimizer_ipopt import SpeedProfileOptimizer
+from controller import generate_racing_line
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +195,7 @@ def main(force_recompute=False):
     # ------------------------------------------------------------------
     # Run parameters -- change any of these to bust the cache
     # ------------------------------------------------------------------
-    TRACK_NAME = "complex"
+    TRACK_NAME = "monaco"
     W_MIN      = 1e-4
     W_MAX      = 5e0
     N_COARSE   = 12
@@ -206,13 +207,53 @@ def main(force_recompute=False):
     key       = _cache_key(TRACK_NAME, W_MIN, W_MAX, N_COARSE, N_REFINE, N_OPT_PTS)
 
     # ------------------------------------------------------------------
-    # 1. Track
+    # 1. Track + SCP racing line
     # ------------------------------------------------------------------
-    print("\n[1/4] Loading track...")
+    print("\n[1/5] Loading track...")
     trk = get_track(TRACK_NAME)
     print(f"  {trk.name} | {len(trk.centerline)} pts | {trk.length:.0f} m")
 
-    opt = SpeedProfileOptimizer(trk.centerline, a_max=4.0, a_brake=8.0, n_points=N_OPT_PTS)
+    print("\n[2/5] Computing SCP racing line (offline path optimization)...")
+    from optimizer import (optimize_racing_line, alpha_to_raceline,
+                           compute_curvature_from_path)
+    from car import CarParams
+
+    # Run SCP at 80 stations — get the RAW subsampled data
+    scp_results = optimize_racing_line(trk, n_stations=80, solver='scp')
+
+    # Extract the 80-station subsampled raceline (where SCP actually optimized)
+    alpha_sub = scp_results['alpha_scp']
+    v_sub     = scp_results['v_scp_raw']
+    n_full = len(trk.centerline)
+    idx_sub = np.linspace(0, n_full - 1, 80, dtype=int)
+    centerline_sub = trk.centerline[idx_sub]
+    normals_sub    = trk.normals[idx_sub]
+    raceline_sub   = alpha_to_raceline(alpha_sub, centerline_sub, normals_sub)
+    kappa_sub      = compute_curvature_from_path(raceline_sub)
+
+    print(f"  SCP: {len(raceline_sub)} stations, J={np.sum(np.linalg.norm(np.diff(raceline_sub, axis=0, append=raceline_sub[0:1]), axis=1) / np.maximum(v_sub, 0.5)):.2f}s")
+
+    # Also keep the full-resolution interpolated results for iLQR later
+    raceline_full = scp_results['raceline_scp']
+    v_full        = scp_results['velocity_scp']
+
+    # Build IPOPT optimizer on the EXACT SAME 80 stations as SCP
+    # Same curvature, same grid, same physics
+    p = CarParams()
+    g = 9.81
+    a_lon = min(p.F_drive_max / p.mass, p.mu * g * 0.6)
+    a_brk = min(p.F_brake_max / p.mass, p.mu * g * 0.9)
+
+    opt = SpeedProfileOptimizer(
+        raceline_sub, a_max=a_lon, a_brake=a_brk,
+        n_points=None, curvature=kappa_sub, grip_fraction=0.85,
+    )
+
+    scp_metrics = opt.compute_metrics(v_sub)
+    print(f"  SCP metrics: T={scp_metrics['lap_time_s']:.1f}s  E={scp_metrics['energy_J']/1e6:.3f} MJ")
+
+    # For the Pareto front, v_scp is the SCP's raw 80-station profile
+    v_scp = v_sub
 
     # ------------------------------------------------------------------
     # 2 & 3. Load from cache or compute
@@ -225,23 +266,26 @@ def main(force_recompute=False):
             print("  Run with --recompute to force a fresh computation.")
 
     if frontier is None:
-        v_base = opt.baseline_speed_profile()
+        # SCP profile IS the min-time point — use as anchor and normalization
+        v_base = v_scp
         base_m = opt.compute_metrics(v_base)
         T_ref  = max(base_m["lap_time_s"], 1.0)
         E_ref  = max(abs(base_m["energy_J"]), 1.0)
 
-        print(f"\n[2/4] Coarse sweep ({N_COARSE} pts, {W_MIN:.0e} -> {W_MAX:.0e})...")
+        print(f"\n[3/5] Coarse sweep ({N_COARSE} pts, {W_MIN:.0e} -> {W_MAX:.0e})...")
         coarse  = opt.compute_pareto_frontier(
             n_points=N_COARSE, w_energy_min=W_MIN, w_energy_max=W_MAX,
             T_ref=T_ref, E_ref=E_ref, prune_dominated=True, verbose=True,
+            v_seed=v_scp,
         )
-        w_list  = list(coarse["w_energy"])
-        t_list  = list(coarse["lap_time"])
-        e_list  = list(coarse["energy"])
-        p_list  = list(coarse["profiles"])
+        # Prepend the SCP min-time point as anchor of the Pareto front
+        w_list  = [0.0] + list(coarse["w_energy"])
+        t_list  = [base_m["lap_time_s"]] + list(coarse["lap_time"])
+        e_list  = [base_m["energy_J"]] + list(coarse["energy"])
+        p_list  = [v_scp] + list(coarse["profiles"])
         print(f"  -> {len(t_list)} non-dominated points after coarse pass")
 
-        print(f"\n[3/4] Adaptive refinement ({N_REFINE} bisections)...")
+        print(f"\n[4/5] Adaptive refinement ({N_REFINE} bisections)...")
         w_list, t_list, e_list, p_list = _refine_frontier(
             opt, w_list, t_list, e_list, p_list,
             n_refine=N_REFINE, T_ref=T_ref, E_ref=E_ref, verbose=True,
@@ -254,7 +298,7 @@ def main(force_recompute=False):
     # ------------------------------------------------------------------
     # 4. Print table
     # ------------------------------------------------------------------
-    print(f"\n[4/4] Pareto Frontier Results ({len(frontier['lap_time'])} pts):")
+    print(f"\n[5/5] Pareto Frontier Results ({len(frontier['lap_time'])} pts):")
     hdr = f"  {'w_energy':<12} {'Time':>10} {'Energy (MJ)':>13} {'DTime':>8} {'DEnergy':>9}"
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
