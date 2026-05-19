@@ -165,8 +165,10 @@ class SpeedProfileOptimizer:
         a_max: float = 5.0,
         a_brake: float = 8.0,
         mu: float = None,
+        grip_fraction: float = 0.85,
         g: float = 9.81,
-        n_points: int = 150,
+        n_points: int = None,
+        curvature: np.ndarray = None,
     ):
         self.racing_line_full = np.asarray(racing_line, dtype=float)
         if self.racing_line_full.ndim != 2 or self.racing_line_full.shape[1] != 2:
@@ -179,19 +181,39 @@ class SpeedProfileOptimizer:
         self.a_max = float(a_max)
         self.a_brake = float(a_brake)
         self.mu = float(mu if mu is not None else self.p.mu)
+        self.grip_fraction = float(grip_fraction)
 
-        # Uniformly-resampled line for the optimizer
-        (
-            self.racing_line,
-            self._s_full,
-            self._s_uniform,
-            self._total_length,
-        ) = _resample_uniform(self.racing_line_full, n_points)
+        if n_points is not None and n_points != len(racing_line):
+            # Uniformly-resampled line for the optimizer
+            (
+                self.racing_line,
+                self._s_full,
+                self._s_uniform,
+                self._total_length,
+            ) = _resample_uniform(self.racing_line_full, n_points)
+            self._resampled = True
+        else:
+            # Work directly at full resolution (no resampling mismatch)
+            self.racing_line = self.racing_line_full
+            ds_tmp = _arc_lengths(self.racing_line_full)
+            self._s_full = np.concatenate([[0.0], np.cumsum(ds_tmp[:-1])])
+            self._s_uniform = self._s_full
+            self._total_length = ds_tmp.sum()
+            self._resampled = False
 
         self.n = len(self.racing_line)
 
         self.ds = _arc_lengths(self.racing_line)
-        self.curvature = _compute_curvature(self.racing_line)
+        # Use externally-provided curvature for consistency with SCP
+        if curvature is not None:
+            if self._resampled:
+                self.curvature = np.interp(
+                    self._s_uniform, self._s_full,
+                    np.abs(curvature), period=self._total_length)
+            else:
+                self.curvature = np.abs(curvature)
+        else:
+            self.curvature = _compute_curvature(self.racing_line)
 
         # Pre-compute the full-resolution ds for metrics
         self._ds_full = _arc_lengths(self.racing_line_full)
@@ -202,6 +224,8 @@ class SpeedProfileOptimizer:
 
     def _to_full_resolution(self, v_opt: np.ndarray) -> np.ndarray:
         """Interpolate optimizer solution (uniform grid) → original resolution."""
+        if not self._resampled:
+            return np.clip(v_opt, self.v_min, self.v_max)
         v_full = np.interp(
             self._s_full,
             self._s_uniform,
@@ -245,7 +269,7 @@ class SpeedProfileOptimizer:
         Useful as a reference and warm-start seed.
         """
         eps = 1e-6
-        v0 = np.sqrt(self.mu * self.g / np.maximum(self.curvature, eps))
+        v0 = np.sqrt(self.grip_fraction * self.mu * self.g / np.maximum(self.curvature, eps))
         v0 = _smooth_speed_profile(
             v0, self.ds, self.v_min, self.v_max, self.a_max, self.a_brake
         )
@@ -345,10 +369,10 @@ class SpeedProfileOptimizer:
         opti.subject_to(v >= self.v_min)
         opti.subject_to(v <= self.v_max)
 
-        # Lateral grip: v² ≤ mu*g / kappa
+        # Lateral grip: v² ≤ grip_fraction * mu*g / kappa
         eps_kappa = 1e-4
         v2_max_lat = ca.DM(
-            self.mu * self.g / (self.curvature + eps_kappa)
+            self.grip_fraction * self.mu * self.g / (self.curvature + eps_kappa)
         )
         opti.subject_to(v ** 2 <= v2_max_lat)
 
@@ -372,7 +396,7 @@ class SpeedProfileOptimizer:
             {
                 "ipopt.print_level": 0,
                 "print_time": 0,
-                "ipopt.max_iter": 3000,
+                "ipopt.max_iter": 10000,
                 "ipopt.tol": 1e-5,
                 "ipopt.acceptable_tol": 1e-3,
                 "ipopt.acceptable_iter": 10,
@@ -446,6 +470,7 @@ class SpeedProfileOptimizer:
         E_ref: float = None,
         prune_dominated: bool = True,
         verbose: bool = True,
+        v_seed: np.ndarray = None,
     ) -> dict:
         """
         Sweep w_energy ∈ [w_energy_min, w_energy_max] on a log scale and
@@ -475,8 +500,8 @@ class SpeedProfileOptimizer:
         if w_energy_min >= w_energy_max:
             raise ValueError("w_energy_min must be < w_energy_max.")
 
-        # Calibrate normalization once
-        v_base = self.baseline_speed_profile()
+        # Calibrate normalization from seed (SCP profile) or baseline
+        v_base = v_seed if v_seed is not None else self.baseline_speed_profile()
         base_metrics = self.compute_metrics(v_base)
         T_ref = T_ref or max(base_metrics["lap_time_s"], 1.0)
         E_ref = E_ref or max(abs(base_metrics["energy_J"]), 1.0)
@@ -494,7 +519,7 @@ class SpeedProfileOptimizer:
         )
 
         lap_times, energies, profiles, w_used = [], [], [], []
-        v_prev = v_base  # warm-start seed
+        v_prev = v_base  # warm-start seed from SCP
 
         for i, we in enumerate(weights):
             if verbose:
