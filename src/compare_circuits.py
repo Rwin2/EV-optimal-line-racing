@@ -33,7 +33,7 @@ CIRCUITS = [
         'key'      : 'complex',
         'label'    : 'Monaco\n(Grand Prix Circuit)',
         'color'    : '#e74c3c',
-        'json'     : 'monaco/race_51laps.json',
+        'json'     : 'complex/race_51laps.json',
         'n_laps'   : 51,
     },
     {
