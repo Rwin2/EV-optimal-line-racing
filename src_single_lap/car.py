@@ -10,16 +10,15 @@ from dataclasses import dataclass, field
 
 @dataclass
 class CarParams:
-    """Physical parameters for the EV race car (Formula E Gen3 baseline)."""
-    # Chassis mass (without battery) and geometry
-    m_chassis: float = 640.0     # kg (chassis + motor + electronics, without battery)
-    e_spec: float = 0.200        # battery specific energy at system level (kWh/kg)
+    """Physical parameters for the EV race car."""
+    # Mass and geometry
+    mass: float = 1600.0         # kg (typical Formula E + battery)
     L: float = 2.9               # wheelbase (m)
     l_f: float = 1.4             # CG to front axle (m)
     l_r: float = 1.5             # CG to rear axle (m)
     width: float = 1.8           # car width (m)
     length: float = 4.8          # car length for rendering (m)
-    I_z: float = 2000.0          # yaw moment of inertia (kg*m^2)
+    I_z: float = 2500.0          # yaw moment of inertia (kg*m^2)
 
     # Tire
     mu: float = 1.0              # tire-road friction coefficient
@@ -33,22 +32,18 @@ class CarParams:
     C_roll: float = 0.012        # rolling resistance coefficient
 
     # Motor and battery
-    P_max: float = 300e3         # max motor power (W) — Formula E Gen3 race mode
-    F_drive_max: float = 10000.0 # max traction force (N)
-    F_brake_max: float = 15000.0 # max braking force (N)
-    eta_motor: float = 0.92      # motor efficiency (driving)
+    P_max: float = 250e3         # max motor power (W) ~250kW
+    F_drive_max: float = 8000.0  # max traction force (N)
+    F_brake_max: float = 12000.0 # max braking force (N)
+    eta_motor: float = 0.92      # motor efficiency
     eta_regen: float = 0.65      # regen braking efficiency
-    Q_batt: float = 40.0         # battery capacity (kWh) — Formula E Gen3 ~37.7 kWh usable
+    Q_batt: float = 5.0          # battery capacity (kWh) - small pack for visible drain
     V_nom: float = 800.0         # nominal voltage (V)
 
     # Limits
-    v_max: float = 80.0          # max speed (m/s) ~288 km/h (Monaco context)
+    v_max: float = 70.0          # max speed (m/s) ~252 km/h
     delta_max: float = 0.5       # max steering angle (rad) ~28 deg
     SOC_min: float = 0.05        # min SOC
-
-    def __post_init__(self):
-        # Total mass = chassis + battery pack; recomputed whenever Q_batt or e_spec changes
-        self.mass = self.m_chassis + self.Q_batt / self.e_spec
 
 
 @dataclass

@@ -31,13 +31,8 @@ from controller import generate_racing_line
 # Cache helpers
 # ---------------------------------------------------------------------------
 
-def _cache_key(track_name, w_min, w_max, n_coarse, n_refine, n_opt_pts, params=None):
-    from car import CarParams
-    p = params or CarParams()
-    car_str = (f"{p.m_chassis}|{p.Q_batt}|{p.e_spec}|{p.P_max}|"
-               f"{p.F_drive_max}|{p.F_brake_max}|{p.eta_motor}|{p.eta_regen}|"
-               f"{p.C_d}|{p.C_roll}|{p.mu}|{p.rho}|{p.A_front}")
-    s = f"{track_name}|{w_min}|{w_max}|{n_coarse}|{n_refine}|{n_opt_pts}|{car_str}"
+def _cache_key(track_name, w_min, w_max, n_coarse, n_refine, n_opt_pts):
+    s = f"{track_name}|{w_min}|{w_max}|{n_coarse}|{n_refine}|{n_opt_pts}"
     return hashlib.md5(s.encode()).hexdigest()[:12]
 
 
@@ -209,8 +204,7 @@ def main(force_recompute=False):
 
     proj_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     cache_dir = _cache_dir(proj_root)
-    from car import CarParams as _CarParams
-    key = _cache_key(TRACK_NAME, W_MIN, W_MAX, N_COARSE, N_REFINE, N_OPT_PTS, _CarParams())
+    key       = _cache_key(TRACK_NAME, W_MIN, W_MAX, N_COARSE, N_REFINE, N_OPT_PTS)
 
     # ------------------------------------------------------------------
     # 1. Track + SCP racing line

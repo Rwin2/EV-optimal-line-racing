@@ -13,11 +13,12 @@ venv/
 env/
 .env/
 
-# IDE
+# IDE / tools
 .vscode/
 .idea/
 *.swp
 *.swo
+.claude/
 
 # OS
 .DS_Store
