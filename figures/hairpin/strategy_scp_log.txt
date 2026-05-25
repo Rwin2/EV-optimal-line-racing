@@ -1,0 +1,80 @@
+=================================================================
+  Phase 4 - Race Strategy Co-optimisation
+=================================================================
+  Track    : hairpin
+  Q_batt   : 26.0 kWh
+  p_min    : 0.8
+  Pareto   : scp
+
+[1/5] Loading track...
+  Auto laps: 51 (64.7 km)
+  Track length : 1269 m  |  Laps : 51
+  Car mass     : 770 kg  (Q=26.0 kWh)
+
+[2/5] Computing Pareto curve (joint line+speed SCP, 20 pts)...
+  [joint SCP 1/2] Min-time racing line (alpha + v)...
+    [SCP] iter  0: J=50.8193  dJ=inf
+           LP: obj_d=-2.9170  max_viol=0.0000  rho=3.00  time=0.2s  total=0.3s
+    [SCP] iter  1: J=48.4806  dJ=2.33870
+           LP: obj_d=-1.8249  max_viol=0.0000  rho=3.00  time=0.3s  total=0.3s
+    [SCP] iter  2: J=47.3520  dJ=1.12862
+           LP: obj_d=-1.8092  max_viol=0.0000  rho=3.00  time=0.3s  total=0.3s
+    [SCP] iter  3: J=46.3542  dJ=0.99779
+           LP: obj_d=-1.7759  max_viol=0.0000  rho=3.00  time=0.4s  total=0.4s
+    [SCP] iter  4: J=45.2182  dJ=1.13602
+           LP: obj_d=-1.4738  max_viol=0.0000  rho=3.00  time=0.2s  total=0.2s
+    [SCP] iter  5: J=44.2799  dJ=0.93826
+           LP: obj_d=-1.3999  max_viol=0.0000  rho=3.00  time=0.2s  total=0.3s
+    [SCP] iter  6: J=43.4767  dJ=0.80320
+           LP: obj_d=-1.2130  max_viol=0.0000  rho=3.00  time=0.3s  total=0.3s
+    [SCP] iter  7: J=42.6744  dJ=0.80230
+           LP: obj_d=-1.2614  max_viol=0.0000  rho=3.00  time=0.3s  total=0.3s
+    [SCP] iter  8: J=41.8650  dJ=0.80946
+           LP: obj_d=-0.9069  max_viol=0.0000  rho=3.00  time=0.3s  total=0.4s
+    [SCP] iter  9: J=41.5014  dJ=0.36355
+           LP: obj_d=-1.2505  max_viol=0.0000  rho=3.00  time=0.3s  total=0.3s
+  [joint SCP 2/2] Energy-weight Pareto sweep...
+    w=0.010  (1/19)  T=40.13s  E=469.3Wh  TxE=18834.4
+    w=0.014  (2/19)  T=40.03s  E=466.9Wh  TxE=18690.1
+    w=0.021  (3/19)  T=40.12s  E=466.0Wh  TxE=18698.8
+    w=0.030  (4/19)  T=40.16s  E=443.8Wh  TxE=17822.3
+    w=0.044  (5/19)  T=40.13s  E=465.7Wh  TxE=18687.5
+    w=0.064  (6/19)  T=40.39s  E=427.2Wh  TxE=17253.2
+    w=0.093  (7/19)  T=40.42s  E=443.9Wh  TxE=17943.2
+    w=0.135  (8/19)  T=40.66s  E=419.6Wh  TxE=17060.7
+    w=0.195  (9/19)  T=41.29s  E=386.4Wh  TxE=15951.2
+    w=0.283  (10/19)  T=41.71s  E=364.8Wh  TxE=15216.8
+    w=0.410  (11/19)  T=41.96s  E=314.5Wh  TxE=13196.6
+    w=0.594  (12/19)  T=43.20s  E=292.0Wh  TxE=12614.5
+    w=0.862  (13/19)  T=44.52s  E=272.5Wh  TxE=12133.5
+    w=1.249  (14/19)  T=46.52s  E=228.2Wh  TxE=10615.6
+    w=1.811  (15/19)  T=48.54s  E=191.5Wh  TxE=9297.5
+    w=2.626  (16/19)  T=50.92s  E=169.4Wh  TxE=8624.1
+    w=3.806  (17/19)  T=54.03s  E=125.4Wh  TxE=6775.1
+    w=5.518  (18/19)  T=58.15s  E=106.6Wh  TxE=6201.3
+    w=8.000  (19/19)  T=63.53s  E=91.0Wh  TxE=5780.5
+  [Pareto] 3 dominated point(s) removed, 17 kept.
+
+  T range: 40.03-63.53s  (58.7% spread)
+  E range: 91.0-466.9 Wh  (413.2% spread)
+  T_max = 46.03s  (15% over fastest 40.03s)
+
+[3/5] Analytical optimal strategy (KKT)...
+  opt* = 0.000  (T*E minimiser at T=40.03s, E=466.9Wh)
+  p* (unconstrained) = 1.0372
+  p* (applied)       = 1.0000
+  T_total            = 34.023 min  (vs baseline 34.023 min)
+  SoC_final          = 8.41%
+  Feasible           : True
+
+[4/5] NLP skipped (--no-nlp).
+
+[5/5] Battery sweep (Q* with vs without strategy)...
+
+  Q*_no_strategy  = 25.0 kWh
+  Q*_with_strategy = 11.0 kWh
+  Battery saving   = 14.0 kWh  ->  70 kg lighter
+
+Figure saved: C:\Users\matth\OneDrive\Bureau\AA 222\EV-optimal-line-racing\figures\hairpin\race_strategy_scp_51laps.png
+
+Done.

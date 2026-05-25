@@ -1,27 +1,27 @@
 """
-Phase 4: Co-optimization of racing line aggressiveness + pace management.
+Phase 4: Co-optimization of racing line choice + pace management.
+
+Two Pareto methods (--pareto-method):
+  grip  — sweeps grip_fraction on fixed line (fast, proxy for line choice)
+  scp   — joint line+speed SCP with energy weight (true geometric line change)
 
 Control variables (per lap t = 1..n_laps):
-  g_t  in [g_min, g_max]  — cornering aggressiveness (grip_fraction proxy)
-  p_t  in [p_min, 1.0]    — pace factor
+  line_t in Pareto front  — operating point choice (grip level or SCP Pareto pt)
+  p_t    in [p_min, 1.0]  — pace factor
 
 Model (linear in p):
-  T_lap(g, p) = T_base(g) / p
-  E_lap(g, p) = E_base(g) * p
+  T_lap(line, p) = T_base(line) / p
+  E_lap(line, p) = E_base(line) * p
 
-NLP:
-  minimize   sum T_lap(g_t, p_t)
-  s.t.       sum_{tau=1}^{t} E_lap(g_tau, p_tau) <= E_budget   for t = 1..n
-  bounds:    g_t in [g_min, g_max],  p_t in [p_min, 1]
-
-Analytical result (KKT, unconstrained relaxation with equality energy budget):
-  g* = argmin  T(g) * E(g)          [product minimizer — proven via KKT]
-  p* = E_budget / (n_laps * E(g*))   [uniform pace]
-  All laps identical at (g*, p*).
+Analytical result (KKT):
+  line* = argmin  T(line) * E(line)   [product minimizer]
+  p*    = E_budget / (n_laps * E(line*))
+  All laps identical at (line*, p*).
 
 Usage:
   python src/race_strategy.py
-  python src/race_strategy.py --laps 51 --Q-batt 34 --p-min 0.80
+  python src/race_strategy.py --pareto-method scp --laps 51 --Q-batt 36.9
+  python src/race_strategy.py --pareto-method grip --laps 51 --Q-batt 36.9
 """
 
 import os
@@ -43,7 +43,7 @@ from battery_sizing import compute_lap_energy_time
 
 
 # ---------------------------------------------------------------------------
-# Pareto curve via grip_fraction sweep
+# Pareto curve — method 1: grip_fraction sweep (fast proxy)
 # ---------------------------------------------------------------------------
 
 def compute_strategy_pareto(racing_line, params, g_min=0.50, g_max=0.90, n_pts=30):
@@ -70,51 +70,117 @@ def compute_strategy_pareto(racing_line, params, g_min=0.50, g_max=0.90, n_pts=3
 
 
 # ---------------------------------------------------------------------------
+# Pareto curve — method 2: joint line+speed SCP (true geometric line change)
+# ---------------------------------------------------------------------------
+
+def compute_scp_pareto(track, params, n_pts=20, w_max=8.0):
+    """
+    Build Pareto front via energy-weighted SCP that jointly optimizes both
+    the racing line geometry (α) and speed profile (v).
+
+    Each Pareto point corresponds to a geometrically different line:
+    high energy weight → tighter cornering, lower speed, less drag.
+    This is the physically correct Phase 4 line-choice model.
+
+    Returns param_arr (normalized [0,1]), T_arr (s), E_arr (Wh).
+    Sorted by T ascending for use in KKT and NLP interpolation.
+    """
+    from optimizer import (solve_scp, compute_joint_pareto,
+                           alpha_to_raceline, compute_curvature_from_path)
+    from scipy.optimize import minimize as sp_min
+
+    n_full     = len(track.centerline)
+    idx        = np.linspace(0, n_full - 1, 80, dtype=int)
+    centerline = track.centerline[idx]
+    normals    = track.normals[idx]
+    widths     = track.widths[idx]
+
+    # Warm-start from min-curvature line (same as run_analysis.py)
+    bounds = [(-w, w) for w in widths]
+    def curv_obj(a):
+        path = alpha_to_raceline(a, centerline, normals)
+        k    = compute_curvature_from_path(path)
+        da   = np.diff(a, append=a[0])
+        return float(np.sum(k**2) + 1e-5 * np.sum(da**2))
+    res_w = sp_min(curv_obj, np.zeros(len(widths)), method='SLSQP',
+                   bounds=bounds, options={'maxiter': 2000, 'ftol': 1e-12, 'disp': False})
+
+    print("  [joint SCP 1/2] Min-time racing line (alpha + v)...")
+    alpha_t, v_t, _ = solve_scp(centerline, normals, widths, params, alpha0=res_w.x)
+
+    print("  [joint SCP 2/2] Energy-weight Pareto sweep...")
+    return compute_joint_pareto(centerline, normals, widths, params, alpha_t, v_t,
+                                 w_max=w_max, n_pts=n_pts)
+
+
+# ---------------------------------------------------------------------------
 # Analytical optimal strategy (KKT)
 # ---------------------------------------------------------------------------
 
 def analytical_optimal(g_arr, T_arr, E_arr, Q_kWh, n_laps,
-                        p_min=0.80, SOC_min=0.05):
+                        p_min=0.80, SOC_min=0.05, T_max=None):
     """
-    Closed-form optimal strategy.
+    Closed-form optimal strategy via KKT.
 
-    KKT conditions give: g* = argmin T(g) * E(g)
-    Intuition: this balances the marginal time-energy trade-off.
-    Then:  p* = E_budget / (n_laps * E(g*)), clipped to [p_min, 1].
+    Three regimes depending on battery sizing:
+      1. Oversized  (p* >= 1 at some line): use min-time line, p=1.
+      2. Constrained (p_min <= p* < 1): KKT gives g* = argmin T*E among
+         lines where energy constraint is binding but feasible.
+      3. Infeasible (p* < p_min for all lines): mission impossible at this Q.
 
-    If p* > 1: battery is oversized -> use min-time strategy (g=g_max, p=1).
-    If p* < p_min: battery too small for this race -> infeasible.
+    If T_max is given, restricts line choice to Pareto points with T <= T_max,
+    modelling a competitive race constraint (can't be too slow vs field).
     """
-    TE = T_arr * E_arr
-    idx_star = int(np.argmin(TE))
-    g_star = g_arr[idx_star]
-    T_star = T_arr[idx_star]
-    E_star = E_arr[idx_star]
-
     E_budget = Q_kWh * 1000.0 * (1.0 - SOC_min)  # Wh
-    p_unconstrained = E_budget / (n_laps * E_star)
+    p_arr    = E_budget / (n_laps * np.maximum(E_arr, 1e-6))
 
-    if p_unconstrained > 1.0:
-        # Battery oversized: revert to minimum-time line at full pace
-        idx_best = int(np.argmin(T_arr))
-        g_star   = g_arr[idx_best]
-        T_star   = T_arr[idx_best]
-        E_star   = E_arr[idx_best]
-        p_star   = 1.0
-        p_unconstrained_clipped = p_unconstrained  # keep for reporting
+    # Apply T_max mask
+    if T_max is not None:
+        t_valid = T_arr <= T_max
+        if not t_valid.any():
+            t_valid = T_arr <= T_arr.min() * 1.01
     else:
-        p_star = max(p_unconstrained, p_min)
-        p_unconstrained_clipped = p_unconstrained
+        t_valid = np.ones(len(T_arr), dtype=bool)
 
-    T_total   = n_laps * T_star / p_star
-    E_total   = n_laps * E_star * p_star
-    SoC_final = 1.0 - E_total / (Q_kWh * 1000.0)
-    feasible  = (p_unconstrained >= p_min) and (SoC_final >= SOC_min - 1e-6)
+    # ── Case 1: oversized — min-time line is feasible at p=1 ──────────────
+    oversized = t_valid & (p_arr >= 1.0)
+    if oversized.any():
+        idx_star = int(np.argmin(np.where(oversized, T_arr, np.inf)))
+        g_star = g_arr[idx_star]; T_star = T_arr[idx_star]; E_star = E_arr[idx_star]
+        p_star = 1.0; p_unconstrained = p_arr[idx_star]
+        T_total = n_laps * T_star
+        E_total = n_laps * E_star
+        SoC_final = 1.0 - E_total / (Q_kWh * 1000.0)
+        feasible = SoC_final >= SOC_min - 1e-6
+
+    else:
+        # ── Case 2: energy binding — KKT g* = argmin T*E among feasible pts ─
+        binding = t_valid & (p_arr >= p_min)
+        if binding.any():
+            TE = T_arr * E_arr
+            idx_star = int(np.argmin(np.where(binding, TE, np.inf)))
+            g_star = g_arr[idx_star]; T_star = T_arr[idx_star]; E_star = E_arr[idx_star]
+            p_unconstrained = p_arr[idx_star]
+            p_star = np.clip(p_unconstrained, p_min, 1.0)
+            T_total = n_laps * T_star / p_star
+            E_total = n_laps * E_star * p_star
+            SoC_final = 1.0 - E_total / (Q_kWh * 1000.0)
+            feasible = SoC_final >= SOC_min - 1e-6
+
+        else:
+            # ── Case 3: infeasible ────────────────────────────────────────────
+            idx_star = int(np.argmin(T_arr))
+            g_star = g_arr[idx_star]; T_star = T_arr[idx_star]; E_star = E_arr[idx_star]
+            p_unconstrained = p_arr[idx_star]; p_star = p_min
+            T_total = n_laps * T_star / p_star
+            E_total = n_laps * E_star * p_star
+            SoC_final = 1.0 - E_total / (Q_kWh * 1000.0)
+            feasible = False
 
     return {
         'g_star'          : g_star,
         'p_star'          : p_star,
-        'p_unconstrained' : p_unconstrained_clipped,
+        'p_unconstrained' : p_unconstrained,
         'T_star'          : T_star,
         'E_star'          : E_star,
         'T_total_s'       : T_total,
@@ -214,42 +280,51 @@ def solve_nlp_strategy(g_arr, T_arr, E_arr, Q_kWh, n_laps=51,
 # Battery sweep: Q* with vs without strategy
 # ---------------------------------------------------------------------------
 
-def sweep_Q_strategy(racing_line, params_base, g_arr, T_arr, E_arr,
-                     n_laps=51, Q_min=20.0, Q_max=55.0, n_pts=36,
-                     p_min=0.80, SOC_min=0.05):
+def sweep_Q_strategy(params_base, g_arr, T_arr, E_arr,
+                     n_laps=51, Q_min=4.0, Q_max=55.0, n_pts=52,
+                     p_min=0.80, SOC_min=0.05, T_max=None):
     """
     For each Q_batt:
-    - No strategy: check feasibility at g=g_max, p=1 (full attack).
-    - With strategy: check feasibility with analytical optimal (g*, p*).
+    - No strategy: check feasibility at fastest line, p=1.
+    - With strategy: check feasibility with analytical optimal.
+
+    E_arr is scaled by mass ratio at each Q (mass coupling).
+    T_arr is unchanged (speed profile is friction-limited, not power-limited).
 
     Returns list of result dicts.
     """
     Q_values = np.linspace(Q_min, Q_max, n_pts)
     results  = []
 
-    # Baseline T and E at full aggressiveness
-    T_base = T_arr[-1]   # g=g_max
-    E_base = E_arr[-1]
+    # Reference mass for scaling E with battery weight changes
+    mass_ref  = params_base.mass  # m_chassis + Q_ref/e_spec
+    _idx_fast = int(np.argmin(T_arr))
+    T_base    = T_arr[_idx_fast]
 
     for Q in Q_values:
         E_budget = Q * 1000.0 * (1.0 - SOC_min)
-        mass     = params_base.m_chassis + Q / params_base.e_spec
+        # Mass coupling: heavier/lighter battery changes rolling & inertial energy
+        # Speed profile is friction-limited (mass-independent in SCP model), so T unchanged
+        mass_new   = params_base.m_chassis + Q / params_base.e_spec
+        mass_scale = mass_new / mass_ref
+        E_arr_q    = E_arr * mass_scale  # E ~ mass (rolling + inertia terms dominate vs drag)
 
-        # No-strategy feasibility
-        E_req_no_strat = n_laps * E_base
+        # No-strategy feasibility (fastest line at p=1, mass-scaled E)
+        E_req_no_strat = n_laps * E_arr_q[_idx_fast]
         feasible_no    = E_budget >= E_req_no_strat
-        T_tot_no       = n_laps * T_base          # same T regardless (p=1)
+        T_tot_no       = n_laps * T_base
         SoC_no         = 1.0 - E_req_no_strat / (Q * 1000.0)
 
         # With-strategy feasibility
-        ana = analytical_optimal(g_arr, T_arr, E_arr, Q, n_laps, p_min, SOC_min)
+        ana = analytical_optimal(g_arr, T_arr, E_arr_q, Q, n_laps, p_min, SOC_min,
+                                  T_max=T_max)
         feasible_strat = ana['feasible']
         T_tot_strat    = ana['T_total_s']
         SoC_strat      = ana['SoC_final']
 
         results.append({
             'Q_kWh'            : Q,
-            'mass_kg'          : mass,
+            'mass_kg'          : mass_new,
             'feasible_no_strat': feasible_no,
             'feasible_strat'   : feasible_strat,
             'T_total_no_s'     : T_tot_no,
@@ -270,7 +345,8 @@ def sweep_Q_strategy(racing_line, params_base, g_arr, T_arr, E_arr,
 
 def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
                             sweep_results, Q_kWh, n_laps, track_name,
-                            output_path=None):
+                            output_path=None, param_label='grip fraction g',
+                            T_max=None):
     """6-panel figure summarising the Phase 4 co-optimisation."""
 
     # Derived sweep arrays
@@ -302,17 +378,20 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
     sc = ax.scatter(T_arr, E_arr, c=g_arr, cmap='plasma', s=60,
                     zorder=3, edgecolors='k', linewidths=0.4, label='Pareto pts')
     ax.plot(T_arr, E_arr, '-', color='0.7', lw=1.2, zorder=2)
-    ax.scatter(T_arr[-1], E_arr[-1], s=160, marker='*', color=C_base, zorder=5,
-               label=f'Baseline (g={g_arr[-1]:.2f}, p=1)')
+    _i_fast = int(np.argmin(T_arr))
+    ax.scatter(T_arr[_i_fast], E_arr[_i_fast], s=160, marker='*', color=C_base, zorder=5,
+               label='Baseline (fastest, p=1)')
     ax.scatter(ana['T_star'], ana['E_star'], s=160, marker='D', color=C_opt, zorder=5,
-               label=f'Optimal g*={ana["g_star"]:.2f}')
+               label=f'Optimal ({param_label.split()[0]}*={ana["g_star"]:.3f})')
     if nlp is not None:
-        T_nlp = np.mean(nlp['T_laps'] * nlp['p'])   # T_base = T_lap*p
-        E_nlp = np.mean(nlp['E_laps'] / nlp['p'])   # E_base = E_lap/p
+        T_nlp = np.mean(nlp['T_laps'] * nlp['p'])
+        E_nlp = np.mean(nlp['E_laps'] / nlp['p'])
         ax.scatter(T_nlp, E_nlp, s=100, marker='^', color=C_nlp, zorder=5,
-                   label=f'NLP avg')
+                   label='NLP avg')
+    if T_max is not None:
+        ax.axvline(T_max, color='grey', ls=':', lw=1.2, label=f'T_max={T_max:.1f}s')
     cb = fig.colorbar(sc, ax=ax, pad=0.02)
-    cb.set_label('grip fraction g', fontsize=8)
+    cb.set_label(param_label, fontsize=8)
     ax.set_xlabel('Lap time T(g)  [s]')
     ax.set_ylabel('Energy E(g)  [Wh/lap]')
     ax.set_title('Pareto curve: T vs E', fontsize=10)
@@ -324,10 +403,10 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
     TE = T_arr * E_arr
     ax.plot(g_arr, TE, 'o-', ms=5, color='#8e44ad', lw=1.8)
     ax.axvline(ana['g_star'], color=C_opt, ls='--', lw=1.5,
-               label=f'g* = {ana["g_star"]:.3f}')
+               label=f'opt* = {ana["g_star"]:.3f}')
     ax.scatter(ana['g_star'], ana['TE_min'], s=120, color=C_opt, zorder=5)
-    ax.set_xlabel('Grip fraction g')
-    ax.set_ylabel('T(g) × E(g)  [s·Wh]')
+    ax.set_xlabel(param_label)
+    ax.set_ylabel('T × E  [s·Wh]')
     ax.set_title('KKT product minimiser', fontsize=10)
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -338,7 +417,9 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
     ax2 = ax.twinx()
 
     # Analytical solution (flat lines)
-    ax.axhline(ana['g_star'], color=C_opt, lw=2.0, label=f'g* = {ana["g_star"]:.3f}')
+    plabel_short = param_label.split()[0]
+    ax.axhline(ana['g_star'], color=C_opt, lw=2.0,
+               label=f'{plabel_short}* = {ana["g_star"]:.3f}')
     ax2.axhline(ana['p_star'], color=C_nlp, lw=2.0, ls='--',
                 label=f'p* = {ana["p_star"]:.3f}')
 
@@ -358,7 +439,7 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, labels1 + labels2, fontsize=7)
     ax.set_xlabel('Lap')
-    ax.set_ylabel('Grip fraction g_t', color=C_opt)
+    ax.set_ylabel(f'{plabel_short}_t', color=C_opt)
     ax.tick_params(axis='y', colors=C_opt)
     ax.set_title('Optimal per-lap strategy', fontsize=10)
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -367,8 +448,8 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
     ax = fig.add_subplot(gs[1, 0])
     laps = np.arange(1, n_laps + 1)
 
-    # Current Q: baseline (g=g_max, p=1)
-    E_base_lap   = E_arr[-1]
+    # Current Q: baseline (fastest line, p=1)
+    E_base_lap   = E_arr[int(np.argmin(T_arr))]
     SoC_base = 1.0 - np.cumsum(np.full(n_laps, E_base_lap)) / (Q_kWh * 1000.0)
     ax.plot(laps, SoC_base * 100, '-', color=C_base, lw=2.0,
             label=f'Q={Q_kWh:.0f} kWh, baseline (p=1)')
@@ -376,7 +457,7 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
     # Strategy scenario: Q*_strategy (p* < 1, shows pace management)
     if Q_star_str is not None and abs(Q_star_str - Q_kWh) > 0.5:
         ana_str = analytical_optimal(g_arr, T_arr, E_arr, Q_star_str, n_laps,
-                                     p_min=0.80)
+                                     p_min=0.80, T_max=T_max)
         E_str_lap = ana_str['E_star'] * ana_str['p_star']
         SoC_str   = 1.0 - np.cumsum(np.full(n_laps, E_str_lap)) / (Q_star_str * 1000.0)
         ax.plot(laps, SoC_str * 100, '--', color=C_strat, lw=1.8,
@@ -413,7 +494,7 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
     ax.set_xlabel('Battery capacity Q (kWh)')
     ax.set_ylabel('Optimal pace factor p*')
     ax.set_title('p*(Q): required pace vs battery size', fontsize=10)
-    ax.set_ylim(0.55, 1.25)
+    ax.set_ylim(max(0.0, np.clip(p_unc, 0, 1.2).min() - 0.05), 1.25)
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3, linestyle='--')
 
@@ -421,9 +502,10 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
     ax = fig.add_subplot(gs[1, 2])
     ax.axis('off')
 
-    T_base_min  = n_laps * T_arr[-1] / 60.0
+    _T_fast     = T_arr[int(np.argmin(T_arr))]
+    T_base_min  = n_laps * _T_fast / 60.0
     T_ana_min   = ana['T_total_min']
-    dT_s        = ana['T_total_s'] - n_laps * T_arr[-1]
+    dT_s        = ana['T_total_s'] - n_laps * _T_fast
     e_spec      = CarParams().e_spec
     mass_saving = (((Q_star_no or 0) - (Q_star_str or 0)) / e_spec
                    if (Q_star_no and Q_star_str) else 0.0)
@@ -443,7 +525,7 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
         f"    T_total      = {T_base_min:.2f} min",
         f"    SoC_final    = {SoC_base[-1]*100:.1f}%",
         "",
-        f"  OPTIMAL (g*={ana['g_star']:.3f}, p*={ana['p_star']:.3f}):",
+        f"  OPTIMAL ({plabel_short}*={ana['g_star']:.3f}, p*={ana['p_star']:.3f}):",
         f"    T_total      = {T_ana_min:.2f} min",
         f"    SoC_final    = {ana['SoC_final']*100:.1f}%",
         f"    dT_race      = {dT_s:+.1f} s",
@@ -456,9 +538,8 @@ def plot_strategy_analysis(g_arr, T_arr, E_arr, ana, nlp,
         "",
         f"  NLP            : {nlp_line}",
         "",
-        "  NOTE: T*E monotone at Monaco",
-        "  => optimal line = max aggression",
-        "  => strategy = pace management only",
+        f"  Pareto method  : {param_label}",
+        f"  T*E minimum at {plabel_short}*={ana['g_star']:.3f}",
     ]
 
     ax.text(0.03, 0.97, "\n".join(lines), transform=ax.transAxes,
@@ -493,28 +574,38 @@ def main():
                         help='Max grip fraction for Pareto sweep')
     parser.add_argument('--n-pareto', type=int, default=30,    dest='n_pareto',
                         help='Number of Pareto sweep points')
+    parser.add_argument('--pareto-method', default='scp',
+                        choices=['scp', 'grip'], dest='pareto_method',
+                        help='Pareto method: scp=joint line+speed (default), grip=grip_fraction proxy')
+    parser.add_argument('--n-pareto-scp', type=int, default=20, dest='n_pareto_scp',
+                        help='Number of Pareto points for SCP method')
+    parser.add_argument('--w-max', type=float, default=8.0, dest='w_max',
+                        help='Max energy weight for SCP Pareto sweep')
     parser.add_argument('--no-nlp',   action='store_true',
                         help='Skip the NLP solve (faster, analytical only)')
     parser.add_argument('--no-plot',  action='store_true')
+    parser.add_argument('--T-max-pct', type=float, default=None, dest='T_max_pct',
+                        help='Max lap time % over fastest (e.g. 15 means T_max=1.15*T_min)')
+    parser.add_argument('--Q-min-sweep', type=float, default=4.0, dest='Q_min_sweep',
+                        help='Min battery Q for sweep (kWh)')
     args = parser.parse_args()
 
     from pathlib import Path
     proj_root = Path(__file__).parent.parent
 
     print("=" * 65)
-    print("  Phase 4 — Race Strategy Co-optimisation")
+    print("  Phase 4 - Race Strategy Co-optimisation")
     print("=" * 65)
     print(f"  Track    : {args.track}")
     print(f"  Q_batt   : {args.Q_kWh} kWh")
     print(f"  p_min    : {args.p_min}")
-    print(f"  g range  : [{args.g_min}, {args.g_max}]  ({args.n_pareto} pts)")
+    print(f"  Pareto   : {args.pareto_method}")
 
     # ------------------------------------------------------------------
     # 1. Load track and racing line
     # ------------------------------------------------------------------
-    print(f"\n[1/5] Loading track and racing line...")
+    print(f"\n[1/5] Loading track...")
     track = get_track(args.track)
-    racing_line, _ = generate_racing_line(track, mode='min_laptime')
 
     if args.laps == 0:
         args.laps = max(20, round(65_000 / track.length))
@@ -525,28 +616,42 @@ def main():
     print(f"  Car mass     : {params.mass:.0f} kg  (Q={args.Q_kWh} kWh)")
 
     # ------------------------------------------------------------------
-    # 2. Compute strategy Pareto curve
+    # 2. Compute Pareto curve (grip proxy OR joint SCP)
     # ------------------------------------------------------------------
-    print(f"\n[2/5] Computing Pareto curve (grip_fraction sweep)...")
-    g_arr, T_arr, E_arr = compute_strategy_pareto(
-        racing_line, params,
-        g_min=args.g_min, g_max=args.g_max, n_pts=args.n_pareto)
+    if args.pareto_method == 'scp':
+        print(f"\n[2/5] Computing Pareto curve (joint line+speed SCP, {args.n_pareto_scp} pts)...")
+        param_arr, T_arr, E_arr = compute_scp_pareto(
+            track, params, n_pts=args.n_pareto_scp, w_max=args.w_max)
+        param_label = 'line index (0=fastest, 1=efficient)'
+    else:
+        print(f"\n[2/5] Computing Pareto curve (grip_fraction sweep, {args.n_pareto} pts)...")
+        racing_line, _ = generate_racing_line(track, mode='min_laptime')
+        param_arr, T_arr, E_arr = compute_strategy_pareto(
+            racing_line, params,
+            g_min=args.g_min, g_max=args.g_max, n_pts=args.n_pareto)
+        param_label = 'grip fraction g'
 
     T_range_pct = 100 * (T_arr.max() - T_arr.min()) / T_arr.min()
     E_range_pct = 100 * (E_arr.max() - E_arr.min()) / E_arr.min()
-    print(f"\n  T range: {T_arr.min():.2f}–{T_arr.max():.2f}s  ({T_range_pct:.1f}% spread)")
-    print(f"  E range: {E_arr.min():.1f}–{E_arr.max():.1f} Wh  ({E_range_pct:.1f}% spread)")
+    print(f"\n  T range: {T_arr.min():.2f}-{T_arr.max():.2f}s  ({T_range_pct:.1f}% spread)")
+    print(f"  E range: {E_arr.min():.1f}-{E_arr.max():.1f} Wh  ({E_range_pct:.1f}% spread)")
 
     # ------------------------------------------------------------------
     # 3. Analytical optimal (KKT)
     # ------------------------------------------------------------------
+    T_max = None
+    if args.T_max_pct is not None:
+        T_max = T_arr.min() * (1.0 + args.T_max_pct / 100.0)
+        print(f"  T_max = {T_max:.2f}s  ({args.T_max_pct:.0f}% over fastest {T_arr.min():.2f}s)")
+
     print(f"\n[3/5] Analytical optimal strategy (KKT)...")
-    ana = analytical_optimal(g_arr, T_arr, E_arr, args.Q_kWh, args.laps,
-                              p_min=args.p_min)
-    print(f"  g* = {ana['g_star']:.3f}  (T*E minimiser at T={ana['T_star']:.2f}s, E={ana['E_star']:.1f}Wh)")
+    ana = analytical_optimal(param_arr, T_arr, E_arr, args.Q_kWh, args.laps,
+                              p_min=args.p_min, T_max=T_max)
+    print(f"  opt* = {ana['g_star']:.3f}  (T*E minimiser at T={ana['T_star']:.2f}s, E={ana['E_star']:.1f}Wh)")
     print(f"  p* (unconstrained) = {ana['p_unconstrained']:.4f}")
     print(f"  p* (applied)       = {ana['p_star']:.4f}")
-    print(f"  T_total            = {ana['T_total_min']:.3f} min  (vs baseline {args.laps * T_arr[-1] / 60:.3f} min)")
+    _T_fast_ref = T_arr[int(np.argmin(T_arr))]
+    print(f"  T_total            = {ana['T_total_min']:.3f} min  (vs baseline {args.laps * _T_fast_ref / 60:.3f} min)")
     print(f"  SoC_final          = {ana['SoC_final']*100:.2f}%")
     print(f"  Feasible           : {ana['feasible']}")
 
@@ -555,14 +660,14 @@ def main():
     # ------------------------------------------------------------------
     nlp = None
     if not args.no_nlp:
-        print(f"\n[4/5] NLP strategy optimisation ({args.laps} laps × 2 vars)...")
-        nlp = solve_nlp_strategy(g_arr, T_arr, E_arr, args.Q_kWh,
+        print(f"\n[4/5] NLP strategy optimisation ({args.laps} laps x 2 vars)...")
+        nlp = solve_nlp_strategy(param_arr, T_arr, E_arr, args.Q_kWh,
                                   n_laps=args.laps, p_min=args.p_min)
         print(f"  Converged  : {nlp['converged']}  ({nlp['message']})")
         print(f"  T_total    : {nlp['T_total_min']:.3f} min")
         print(f"  SoC_final  : {nlp['SoC_final']*100:.2f}%")
-        print(f"  g mean/std : {nlp['g'].mean():.4f} / {nlp['g'].std():.5f}")
-        print(f"  p mean/std : {nlp['p'].mean():.4f} / {nlp['p'].std():.5f}")
+        print(f"  opt mean/std : {nlp['g'].mean():.4f} / {nlp['g'].std():.5f}")
+        print(f"  p   mean/std : {nlp['p'].mean():.4f} / {nlp['p'].std():.5f}")
     else:
         print(f"\n[4/5] NLP skipped (--no-nlp).")
 
@@ -571,9 +676,9 @@ def main():
     # ------------------------------------------------------------------
     print(f"\n[5/5] Battery sweep (Q* with vs without strategy)...")
     sweep = sweep_Q_strategy(
-        racing_line, params, g_arr, T_arr, E_arr,
-        n_laps=args.laps, Q_min=20.0, Q_max=55.0, n_pts=36,
-        p_min=args.p_min)
+        params, param_arr, T_arr, E_arr,
+        n_laps=args.laps, Q_min=args.Q_min_sweep, Q_max=55.0, n_pts=52,
+        p_min=args.p_min, T_max=T_max)
 
     Q_arr_sw = np.array([r['Q_kWh'] for r in sweep])
     feas_no  = np.array([r['feasible_no_strat'] for r in sweep])
@@ -596,11 +701,12 @@ def main():
     if not args.no_plot:
         fig_dir = proj_root / 'figures' / args.track
         fig_dir.mkdir(parents=True, exist_ok=True)
-        out = str(fig_dir / f'race_strategy_{args.laps}laps.png')
+        suffix = f'race_strategy_{args.pareto_method}_{args.laps}laps.png'
+        out = str(fig_dir / suffix)
         plot_strategy_analysis(
-            g_arr, T_arr, E_arr, ana, nlp, sweep,
+            param_arr, T_arr, E_arr, ana, nlp, sweep,
             args.Q_kWh, args.laps, track.name,
-            output_path=out)
+            output_path=out, param_label=param_label, T_max=T_max)
 
     print("\nDone.")
 

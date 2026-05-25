@@ -250,7 +250,7 @@ def solve_scp(centerline, normals, widths, car_params, alpha0=None,
 
         max_viol = float(np.max(np.maximum(A_ub @ delta - b_ub, 0)))
         obj_decrease = float(c_obj @ delta)
-        print(f"           LP: obj_Δ={obj_decrease:.4f}  max_viol={max_viol:.4f}  "
+        print(f"           LP: obj_d={obj_decrease:.4f}  max_viol={max_viol:.4f}  "
               f"rho={rho:.2f}  time={t_lp:.1f}s  total={time.time()-t_iter:.1f}s")
 
         # Adaptive trust region (like ρ in HW2 solve_swingup_scp)
@@ -430,6 +430,226 @@ def solve_scp_pareto(kappa, ds, car_params, v0, w_time=1.0, w_energy=1.0,
             rho = max(rho * 0.5, 0.1)
 
     return v
+
+
+# ── Joint line+speed Pareto: energy-weighted SCP ─────────────────────────
+
+def solve_scp_pareto_joint(centerline, normals, widths, car_params, alpha0, v0,
+                            w_energy=1.0, T_ref=1.0, E_ref=1.0,
+                            rho=2.0, eps=5e-3, max_iters=12):
+    """
+    Joint path+speed SCP with combined time+energy objective:
+        J = T(α,v) / T_ref  +  w_energy * E(α,v) / E_ref
+
+    Both the racing line (α) and speed (v) are jointly optimized.
+    Warm-started from (alpha0, v0) — typically the min-time solution.
+    Higher w_energy pushes towards energy-saving lines (tighter cornering,
+    lower speed). Used in a sweep to build the joint Pareto front.
+
+    Returns: alpha (n,), v (n,), T_final (float), E_final (float)
+    """
+    from simplex import solve_lp
+
+    n    = len(centerline)
+    p    = car_params
+    grav = 9.81
+    a_lat = p.mu * grav * 0.85
+    a_lon = min(p.F_drive_max / p.mass, p.mu * grav * 0.6)
+    a_brk = min(p.F_brake_max / p.mass, p.mu * grav * 0.9)
+    rho_init = rho
+
+    alpha, v = alpha0.copy(), v0.copy()
+    J_prev = np.inf
+
+    def _energy(v_, ds_):
+        """Net electrical energy in Wh (consistent with compute_lap_energy_time)."""
+        v_s = np.maximum(v_, 1e-3)
+        dt  = ds_ / v_s
+        dv  = np.roll(v_, -1) - np.roll(v_, 1)
+        a   = dv / (2.0 * np.maximum(dt, 1e-6))
+        F_d = 0.5 * p.rho * p.C_d * p.A_front * v_**2
+        F_t = p.mass * a + F_d + p.C_roll * p.mass * grav
+        P_m = F_t * v_
+        J   = float(np.sum((np.maximum(P_m, 0) / p.eta_motor
+                             + np.minimum(P_m, 0) * p.eta_regen) * dt))
+        return J / 3600.0  # J → Wh
+
+    for it in range(max_iters):
+        path  = alpha_to_raceline(alpha, centerline, normals)
+        dpath = np.diff(path, axis=0, append=path[0:1])
+        ds    = np.linalg.norm(dpath, axis=1)
+        v_next = np.roll(v, -1)
+        v_s    = np.maximum(v, 1e-3)
+
+        kappa, dkappa_da = _jax_curvature_jacobian(alpha, centerline, normals)
+
+        T = float(np.sum(ds / v_s))
+        E = _energy(v, ds)
+        J = T / T_ref + w_energy * E / E_ref
+        if it > 0 and abs(J_prev - J) < eps:
+            break
+        J_prev = J
+
+        # ∂ds/∂α — banded (same as solve_scp)
+        dds_da = np.zeros((n, n))
+        for i in range(n):
+            ip1 = (i + 1) % n
+            dds_da[i, i]   = -np.dot(dpath[i], normals[i])   / ds[i]
+            dds_da[i, ip1] +=  np.dot(dpath[i], normals[ip1]) / ds[i]
+
+        # Time gradients ∂T/∂α and ∂T/∂v
+        c_T_alpha = dds_da.T @ (1.0 / v_s)
+        c_T_v     = -ds / v_s**2
+
+        # Energy gradient ∂E/∂α via ∂E/∂ds: dE[Wh]/dds_i = (F_t/eta) / 3600
+        # F_t/eta gives dE in J/m; divide by 3600 to get Wh/m (consistent with E_ref in Wh)
+        dt_s   = ds / v_s
+        dv_c   = np.roll(v, -1) - np.roll(v, 1)
+        a_long = dv_c / (2.0 * np.maximum(dt_s, 1e-6))
+        F_drag = 0.5 * p.rho * p.C_d * p.A_front * v**2
+        F_t    = p.mass * a_long + F_drag + p.C_roll * p.mass * grav
+        dE_dds = np.where(F_t >= 0, F_t / p.eta_motor, F_t * p.eta_regen)
+        c_E_alpha = (dds_da.T @ dE_dds) / 3600.0  # J/m → Wh/m per unit alpha
+
+        # Energy gradient ∂E/∂v — finite differences
+        c_E_v  = np.zeros(n)
+        eps_fd = 1e-3
+        for i in range(n):
+            vp = v.copy(); vp[i] += eps_fd
+            c_E_v[i] = (_energy(vp, ds) - E) / eps_fd
+
+        c_obj = np.concatenate([
+            c_T_alpha / T_ref + w_energy * c_E_alpha / E_ref,
+            c_T_v     / T_ref + w_energy * c_E_v     / E_ref,
+        ])
+
+        # Physics constraints — identical to solve_scp
+        sgn_k   = np.where(kappa >= 0, 1.0, -1.0)
+        dc_c_da = -(v**2)[:, None] * sgn_k[:, None] * dkappa_da
+        dc_c_dv = np.diag(-2.0 * v * np.abs(kappa))
+        c_c0    = a_lat - v**2 * np.abs(kappa)
+
+        dc_a_da = 2.0 * a_lon * dds_da
+        dc_a_dv = np.zeros((n, n))
+        for i in range(n):
+            ip1 = (i + 1) % n
+            dc_a_dv[i, i]   =  2.0 * v[i]
+            dc_a_dv[i, ip1] = -2.0 * v_next[i]
+        c_a0 = v**2 + 2.0 * a_lon * ds - v_next**2
+
+        dc_b_da = 2.0 * a_brk * dds_da
+        dc_b_dv = np.zeros((n, n))
+        for i in range(n):
+            ip1 = (i + 1) % n
+            dc_b_dv[i, i]   = -2.0 * v[i]
+            dc_b_dv[i, ip1] =  2.0 * v_next[i]
+        c_b0 = v_next**2 + 2.0 * a_brk * ds - v**2
+
+        A_ub = np.vstack([
+            np.hstack([-dc_c_da, -dc_c_dv]),
+            np.hstack([-dc_a_da, -dc_a_dv]),
+            np.hstack([-dc_b_da, -dc_b_dv]),
+        ])
+        b_ub = np.concatenate([c_c0, c_a0, c_b0])
+
+        lb_scp = np.concatenate([
+            np.maximum(-rho,     -widths - alpha),
+            np.maximum(-rho*3.0,  1.0    - v),
+        ])
+        ub_scp = np.concatenate([
+            np.minimum( rho,      widths - alpha),
+            np.minimum( rho*3.0,  p.v_max - v),
+        ])
+
+        delta     = solve_lp(c_obj, A_ub, b_ub, lb_scp, ub_scp)
+        max_viol  = float(np.max(np.maximum(A_ub @ delta - b_ub, 0)))
+        if max_viol > 0.5:
+            delta *= min(0.5 / max(max_viol, 1e-6), 1.0)
+            rho = max(rho * 0.5, 0.1)
+
+        alpha_new = np.clip(alpha + delta[:n], -widths, widths)
+        v_new     = np.clip(v     + delta[n:],  1.0, p.v_max)
+
+        path_new = alpha_to_raceline(alpha_new, centerline, normals)
+        ds_new   = np.linalg.norm(np.diff(path_new, axis=0, append=path_new[0:1]), axis=1)
+        J_new    = (float(np.sum(ds_new / np.maximum(v_new, 1e-3))) / T_ref
+                    + w_energy * _energy(v_new, ds_new) / E_ref)
+
+        alpha, v = alpha_new, v_new
+        rho = min(rho * 1.2, rho_init) if J_new < J else max(rho * 0.5, 0.1)
+
+    path = alpha_to_raceline(alpha, centerline, normals)
+    ds   = np.linalg.norm(np.diff(path, axis=0, append=path[0:1]), axis=1)
+    return alpha, v, float(np.sum(ds / np.maximum(v, 1e-3))), _energy(v, ds)
+
+
+def compute_joint_pareto(centerline, normals, widths, car_params,
+                          alpha_time, v_time, w_max=8.0, n_pts=20,
+                          rho=2.0, eps=5e-3, max_iters=12):
+    """
+    Build joint line+speed Pareto front by sweeping w_energy in [0, w_max].
+
+    Warm-starts each Pareto point from the previous solution (continuation).
+    Returns arrays sorted by T ascending for use as interpolation input.
+
+    Returns:
+        param_arr: normalized line-choice parameter in [0, 1]  (0=fastest, 1=most efficient)
+        T_arr:     lap time at each Pareto point (s)
+        E_arr:     lap energy at each Pareto point (Wh)
+    """
+    p    = car_params
+    grav = 9.81
+
+    # Reference values from min-time solution
+    path0 = alpha_to_raceline(alpha_time, centerline, normals)
+    ds0   = np.linalg.norm(np.diff(path0, axis=0, append=path0[0:1]), axis=1)
+    v_s0  = np.maximum(v_time, 1e-3)
+    T_ref = float(np.sum(ds0 / v_s0))
+
+    dt0  = ds0 / v_s0
+    dv0  = np.roll(v_time, -1) - np.roll(v_time, 1)
+    a0   = dv0 / (2 * np.maximum(dt0, 1e-6))
+    F_d0 = 0.5 * p.rho * p.C_d * p.A_front * v_time**2
+    F_t0 = p.mass * a0 + F_d0 + p.C_roll * p.mass * grav
+    P_m0 = F_t0 * v_time
+    E_ref = float(np.sum((np.maximum(P_m0, 0) / p.eta_motor
+                          + np.minimum(P_m0, 0) * p.eta_regen) * dt0)) / 3600.0  # J → Wh
+
+    w_arr  = np.concatenate([[0.0], np.geomspace(1e-2, w_max, n_pts - 1)])
+    T_list = [T_ref]
+    E_list = [E_ref]
+    alpha_c, v_c = alpha_time.copy(), v_time.copy()
+
+    n_sweep = len(w_arr) - 1  # number of points after w=0
+    for i, w in enumerate(w_arr[1:], 1):
+        print(f"    w={w:.3f}  ({i}/{n_sweep})", end='  ', flush=True)
+        alpha_c, v_c, T_i, E_i = solve_scp_pareto_joint(
+            centerline, normals, widths, car_params, alpha_c, v_c,
+            w_energy=w, T_ref=T_ref, E_ref=E_ref,
+            rho=rho, eps=eps, max_iters=max_iters)
+        T_list.append(T_i)
+        E_list.append(E_i)
+        print(f"T={T_i:.2f}s  E={E_i:.1f}Wh  TxE={T_i*E_i:.1f}")
+
+    T_arr = np.array(T_list)
+    E_arr = np.array(E_list)
+    # Sort by T ascending
+    idx   = np.argsort(T_arr)
+    T_arr, E_arr = T_arr[idx], E_arr[idx]
+    # Keep only non-dominated points: scan T ascending, keep iff E reaches a new minimum
+    nd_idx = []
+    min_E  = np.inf
+    for i in range(len(T_arr)):
+        if E_arr[i] < min_E:
+            min_E = E_arr[i]
+            nd_idx.append(i)
+    T_arr    = T_arr[nd_idx]
+    E_arr    = E_arr[nd_idx]
+    n_kept   = len(nd_idx)
+    if n_kept < n_pts:
+        print(f"  [Pareto] {n_pts - n_kept} dominated point(s) removed, {n_kept} kept.")
+    param_arr = np.linspace(0.0, 1.0, n_kept)
+    return param_arr, T_arr, E_arr
 
 
 # ── Stage 2: Velocity profile optimization ───────────────────────────────
