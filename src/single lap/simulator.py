@@ -1,26 +1,15 @@
 """
 EV Racing Simulator
 ====================
-Professional racing simulator with:
+Racing simulator with:
 - Realistic track rendering (asphalt, curbs, grass)
 - Multiple car simulation with different strategies
 - Video/GIF output of races
 - Telemetry overlay (speed, SOC, lap time)
-- Race results saved to races/ directory with timestamps
-
-Usage:
-    python simulator.py                          # default race
-    python simulator.py --track complex          # choose track
-    python simulator.py --controllers center aggressive eco  # pick strategies
-    python simulator.py --time 30 --gif          # 30s race, GIF output
 """
 
 import sys
 import os
-import json
-import argparse
-from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import matplotlib
@@ -32,9 +21,8 @@ import matplotlib.patheffects as pe
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from track import get_track, Track, TRACK_GENERATORS
-from car import BicycleModel, CarState, CarParams
-from controller import PurePursuitController, ILQRController, generate_racing_line
+from track import Track
+from car import CarState
 
 # ── Color palette ────────────────────────────────────────────────────────
 ASPHALT      = '#3a3a3a'
@@ -46,14 +34,6 @@ CURB_WHITE   = '#eeeeee'
 LINE_WHITE   = '#cccccc'
 BACKGROUND   = '#1a3a15'
 
-RACE_STRATEGIES = {
-    'center':     {'name': 'Center-Line',   'line': 'center',       'speed': 'curvature',    'color': '#3399ff', 'ctrl': 'pursuit'},
-    'optimal':    {'name': 'Min-LapTime',   'line': 'min_laptime',  'speed': 'aggressive',   'color': '#ff3333', 'ctrl': 'pursuit'},
-    'aggressive': {'name': 'Aggressive',    'line': 'min_laptime',  'speed': 'aggressive',   'color': '#ffcc00', 'ctrl': 'pursuit'},
-    'eco':        {'name': 'Eco-Save',      'line': 'center',       'speed': 'energy_saving','color': '#33cc66', 'ctrl': 'pursuit'},
-    'constant':   {'name': 'Constant-Speed','line': 'center',       'speed': 'constant',     'color': '#cc66ff', 'ctrl': 'pursuit'},
-    'ilqr':       {'name': 'TV-LQR',        'line': 'min_laptime',  'speed': 'aggressive',   'color': '#00ff88', 'ctrl': 'ilqr'},
-}
 
 
 # ── Track drawing ────────────────────────────────────────────────────────
@@ -124,26 +104,7 @@ def draw_track(ax, track: Track, show_racing_lines=None):
     ax.axis('off')
 
 
-def draw_car(ax, state, color, label=None):
-    """Draw car as a rounded rectangle with heading."""
-    w, h = 1.8, 4.8
-    body = patches.FancyBboxPatch((-h/2, -w/2), h, w, boxstyle="round,pad=0.3",
-                                   fc=color, ec='white', lw=0.8, zorder=10)
-    t = Affine2D().rotate(state.psi).translate(state.x, state.y) + ax.transData
-    body.set_transform(t)
-    ax.add_patch(body)
-    # Windshield
-    ws = patches.FancyBboxPatch((h/6, -w/2.5), h/4, w/1.25, boxstyle="round,pad=0.1",
-                                 fc='#111', ec='none', zorder=10.1)
-    ws.set_transform(t)
-    ax.add_patch(ws)
-    if label:
-        ax.text(state.x, state.y + w + 3, label, color=color, fontsize=6.5,
-                ha='center', va='bottom', fontweight='bold', zorder=12,
-                path_effects=[pe.withStroke(linewidth=2, foreground='black')])
-
-
-# ── Simulation ───────────────────────────────────────────────────────────
+# ── Simulation ───────────────────────────────────────────────────────
 
 def simulate_race(track, controllers, car_models, initial_states, dt=0.02, max_time=60.0,
                   stop_after_laps=1):
@@ -160,15 +121,15 @@ def simulate_race(track, controllers, car_models, initial_states, dt=0.02, max_t
 
     current = list(initial_states)
 
-    # Lap detection: track arc-length progress around the circuit
-    start_pos = track.centerline[0]
+    # Lap detection: track nearest centerline index, detect wrap-around
     n_track = len(track.centerline)
     prev_idx = [0] * n_cars
     lap_counts = [0] * n_cars
     lap_times = [[] for _ in range(n_cars)]
     lap_start_step = [0] * n_cars
-    # Don't count laps during first few seconds (startup)
-    warmup_steps = int(2.0 / dt)
+    warmup_steps = int(3.0 / dt)
+    # Track progress: index must advance past 50% before wrapping counts
+    past_halfway = [False] * n_cars
 
     actual_steps = 0
     race_done = False
@@ -187,19 +148,21 @@ def simulate_race(track, controllers, car_models, initial_states, dt=0.02, max_t
             delta, F_drive = controllers[i].control(s)
             current[i] = car_models[i].step(s, delta, F_drive, dt)
 
-            # Lap detection: find nearest centerline index
+            # Lap detection: nearest centerline index wraps from high to low
             if step > warmup_steps:
                 dists = np.sqrt((track.centerline[:, 0] - s.x)**2 +
                                 (track.centerline[:, 1] - s.y)**2)
                 curr_idx = np.argmin(dists)
-                # Detect crossing from high index back to low (completing a lap)
-                if prev_idx[i] > n_track * 0.75 and curr_idx < n_track * 0.25:
+                if curr_idx > n_track * 0.5:
+                    past_halfway[i] = True
+                if past_halfway[i] and prev_idx[i] > n_track * 0.7 and curr_idx < n_track * 0.3:
                     lap_counts[i] += 1
                     lap_time = (step - lap_start_step[i]) * dt
                     lap_times[i].append(lap_time)
                     lap_start_step[i] = step
+                    past_halfway[i] = False
                     print(f"    {controllers[i].__class__.__name__} car {i}: Lap {lap_counts[i]} in {lap_time:.1f}s")
-                    if lap_counts[i] >= stop_after_laps:
+                    if all(lc >= stop_after_laps for lc in lap_counts):
                         race_done = True
                 prev_idx[i] = curr_idx
 
@@ -237,7 +200,7 @@ def simulate_race(track, controllers, car_models, initial_states, dt=0.02, max_t
     }
 
 
-# ── Rendering ────────────────────────────────────────────────────────────
+# ── Rendering ────────────────────────────────────────────────────────
 
 def render_video(track, sim_data, car_names, car_colors,
                  output_path, racing_lines=None, fps=20, fmt='mp4'):
@@ -359,213 +322,3 @@ def render_video(track, sim_data, car_names, car_colors,
     anim.save(output_path, writer=writer)
     plt.close(fig)
     print(f"  Saved: {output_path}")
-
-
-def render_static_frame(track, states, car_names, car_colors,
-                        racing_lines=None, output_path='frame.png'):
-    """Render a single static frame."""
-    fig = plt.figure(figsize=(10, 8), dpi=150, facecolor='#111111')
-    ax = fig.add_subplot(111)
-
-    draw_track(ax, track, show_racing_lines=racing_lines)
-
-    for i, state in enumerate(states):
-        draw_car(ax, state, car_colors[i], label=car_names[i])
-
-    ax.set_title(track.name, color='white', fontsize=14,
-                 fontweight='bold', fontfamily='monospace', pad=10)
-    fig.tight_layout()
-    fig.savefig(output_path, facecolor=fig.get_facecolor(), edgecolor='none', bbox_inches='tight')
-    plt.close(fig)
-    print(f"  Saved: {output_path}")
-
-
-# ── Output management ────────────────────────────────────────────────────
-
-def create_race_output_dir(proj_root):
-    """Create timestamped race output directory."""
-    races_dir = proj_root / 'races'
-    races_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    race_dir = races_dir / f'race_{timestamp}'
-    race_dir.mkdir()
-    (race_dir / 'video').mkdir()
-    (race_dir / 'results').mkdir()
-    return race_dir
-
-
-def save_race_results(race_dir, car_names, controller_keys, metrics, track_name, sim_time):
-    """Save per-controller results and overall benchmark."""
-    results_dir = race_dir / 'results'
-
-    # Per-controller results
-    for i, key in enumerate(controller_keys):
-        ctrl_dir = results_dir / key
-        ctrl_dir.mkdir(exist_ok=True)
-        with open(ctrl_dir / 'metrics.json', 'w') as f:
-            json.dump({
-                'controller': key,
-                'name': car_names[i],
-                'track': track_name,
-                'sim_time_s': sim_time,
-                **metrics[i]
-            }, f, indent=2)
-
-    # Overall benchmark
-    benchmark = {
-        'track': track_name,
-        'sim_time_s': sim_time,
-        'timestamp': datetime.now().isoformat(),
-        'controllers': {}
-    }
-    for i, key in enumerate(controller_keys):
-        benchmark['controllers'][key] = {
-            'name': car_names[i],
-            **metrics[i]
-        }
-
-    # Determine rankings
-    by_dist = sorted(range(len(metrics)), key=lambda i: -metrics[i]['distance_m'])
-    by_energy = sorted(range(len(metrics)), key=lambda i: metrics[i]['energy_used_pct'])
-    benchmark['rankings'] = {
-        'fastest_by_distance': controller_keys[by_dist[0]],
-        'most_efficient': controller_keys[by_energy[0]],
-    }
-
-    with open(results_dir / 'benchmark.json', 'w') as f:
-        json.dump(benchmark, f, indent=2)
-
-    # Human-readable summary
-    with open(results_dir / 'benchmark.md', 'w') as f:
-        f.write(f'# Race Benchmark: {track_name}\n\n')
-        f.write(f'**Date:** {datetime.now().strftime("%Y-%m-%d %H:%M")}\n')
-        f.write(f'**Sim time:** {sim_time}s\n\n')
-        f.write(f'| Controller | Distance (m) | Avg Speed (km/h) | Max Speed (km/h) | Energy Used (%) | Final SOC |\n')
-        f.write(f'|------------|-------------|-------------------|-------------------|-----------------|----------|\n')
-        for i, key in enumerate(controller_keys):
-            m = metrics[i]
-            f.write(f"| {car_names[i]} | {m['distance_m']:.0f} | {m['avg_speed_kmh']:.1f} | "
-                    f"{m['max_speed_kmh']:.1f} | {m['energy_used_pct']:.2f} | {m['final_SOC']:.3f} |\n")
-        f.write(f'\n**Fastest:** {car_names[by_dist[0]]}\n')
-        f.write(f'**Most efficient:** {car_names[by_energy[0]]}\n')
-
-
-# ── Main ─────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description='EV Racing Simulator')
-    parser.add_argument('--track', default='complex', choices=list(TRACK_GENERATORS.keys()),
-                        help='Track to race on')
-    parser.add_argument('--strategies', nargs='+', default=['center', 'optimal', 'aggressive', 'eco'],
-                        choices=list(RACE_STRATEGIES.keys()), help='Race strategies to compare')
-    parser.add_argument('--time', type=float, default=120.0, help='Max simulation time (seconds)')
-    parser.add_argument('--laps', type=int, default=1, help='Stop after N laps')
-    parser.add_argument('--dt', type=float, default=0.02, help='Time step')
-    parser.add_argument('--gif', action='store_true', help='Output GIF instead of MP4')
-    parser.add_argument('--fps', type=int, default=15, help='Video FPS')
-    parser.add_argument('--no-video', action='store_true', help='Skip video, only save results')
-    parser.add_argument('--figure-only', action='store_true', help='Only generate static figure')
-    args = parser.parse_args()
-
-    proj_root = Path(__file__).parent.parent
-
-    print("=" * 60)
-    print("  EV Optimal Line Racing Simulator")
-    print("=" * 60)
-
-    # Track
-    print(f"\n[1/5] Generating track: {args.track}")
-    track = get_track(args.track)
-    print(f"  {track.name} | {track.length:.0f} m | {len(track.centerline)} pts")
-
-    # Race strategies
-    print(f"\n[2/5] Setting up {len(args.strategies)} race strategies...")
-    tangent = track.centerline[1] - track.centerline[0]
-    heading = np.arctan2(tangent[1], tangent[0])
-    params = CarParams()
-
-    controllers, car_models, initial_states = [], [], []
-    car_names, car_colors, racing_lines, ctrl_keys = [], [], [], []
-
-    line_cache = {}  # avoid recomputing the same racing line twice
-    for i, key in enumerate(args.strategies):
-        cfg = RACE_STRATEGIES[key]
-        if cfg['line'] not in line_cache:
-            line_cache[cfg['line']] = generate_racing_line(track, mode=cfg['line'])
-        rl, v_profile = line_cache[cfg['line']]
-        if cfg.get('ctrl') == 'ilqr':
-            ctrl = ILQRController(track, racing_line=rl, v_profile=v_profile, params=params)
-        else:
-            ctrl = PurePursuitController(track, racing_line=rl, params=params,
-                                         speed_mode=cfg['speed'], v_profile=v_profile)
-        controllers.append(ctrl)
-        car_models.append(BicycleModel(params))
-        start_pos = track.centerline[0] + (i - len(args.strategies)/2) * 2.5 * track.normals[0]
-        initial_states.append(CarState(x=start_pos[0], y=start_pos[1], psi=heading, vx=12.0, SOC=1.0))
-        car_names.append(cfg['name'])
-        car_colors.append(cfg['color'])
-        racing_lines.append(rl)
-        ctrl_keys.append(key)
-        print(f"  [{cfg['name']}] line={cfg['line']}, speed_tracking={cfg['speed']}")
-
-    # Static figure only mode
-    if args.figure_only:
-        fig_dir = proj_root / 'figures'
-        fig_dir.mkdir(exist_ok=True)
-        states = [CarState(x=track.centerline[len(track.centerline)//4, 0],
-                           y=track.centerline[len(track.centerline)//4, 1],
-                           psi=heading)]
-        center_rl, _ = generate_racing_line(track, mode="center")
-        render_static_frame(track, states, ['EV'], ['#3399ff'],
-                            racing_lines=[(center_rl, '#3399ff', 'Racing Line')],
-                            output_path=str(fig_dir / 'track_with_raceline.png'))
-        print("\nDone! Figure only.")
-        return
-
-    # Simulate
-    print(f"\n[3/5] Simulating (max {args.time}s, stop after {args.laps} lap(s))...")
-    sim_data = simulate_race(track, controllers, car_models, initial_states,
-                             dt=args.dt, max_time=args.time, stop_after_laps=args.laps)
-    sim_time_actual = sim_data['n_steps'] * args.dt
-    print(f"  {sim_data['n_steps']} steps x {len(controllers)} cars ({sim_time_actual:.1f}s)")
-
-    # Results
-    print("\n[4/5] Results:")
-    print(f"  {'Controller':<16} {'Dist (m)':>9} {'Avg (km/h)':>11} {'Max (km/h)':>11} {'E used (%)':>11} {'SOC':>6}")
-    print(f"  {'─'*70}")
-    for i, key in enumerate(ctrl_keys):
-        m = sim_data['metrics'][i]
-        print(f"  {car_names[i]:<16} {m['distance_m']:>8.0f} {m['avg_speed_kmh']:>10.1f} "
-              f"{m['max_speed_kmh']:>10.1f} {m['energy_used_pct']:>10.2f} {m['final_SOC']:>6.3f}")
-
-    # Save outputs
-    race_dir = create_race_output_dir(proj_root)
-    save_race_results(race_dir, car_names, ctrl_keys, sim_data['metrics'], track.name, args.time)
-    print(f"\n[5/5] Saving outputs to {race_dir.name}/")
-
-    # Static frame
-    fig_dir = proj_root / 'figures'
-    fig_dir.mkdir(exist_ok=True)
-    frame_idx = sim_data['n_steps'] // 4
-    frame_states = [CarState(x=sim_data['positions'][i][frame_idx, 0],
-                             y=sim_data['positions'][i][frame_idx, 1],
-                             psi=sim_data['headings'][i][frame_idx])
-                    for i in range(len(ctrl_keys))]
-    rl_display = [(racing_lines[i], car_colors[i], car_names[i]) for i in range(len(ctrl_keys))]
-    render_static_frame(track, frame_states, car_names, car_colors,
-                        racing_lines=rl_display,
-                        output_path=str(fig_dir / 'track_with_raceline.png'))
-
-    # Video/GIF
-    if not args.no_video:
-        ext = 'gif' if args.gif else 'mp4'
-        vid_path = str(race_dir / 'video' / f'race.{ext}')
-        render_video(track, sim_data, car_names, car_colors,
-                     output_path=vid_path, racing_lines=rl_display,
-                     fps=args.fps, fmt=ext)
-
-    print(f"\nDone! Results in: {race_dir}")
-
-
-if __name__ == '__main__':
-    main()
