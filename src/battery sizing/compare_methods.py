@@ -18,7 +18,10 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.dirname(__file__))
+_this = os.path.dirname(os.path.abspath(__file__))
+_sl   = os.path.join(os.path.dirname(_this), 'single lap')
+sys.path.insert(0, _sl)
+sys.path.insert(0, _this)
 
 from car import CarParams
 from track import get_track
@@ -141,7 +144,7 @@ def main():
     args = parser.parse_args()
 
     from pathlib import Path
-    proj_root = Path(__file__).parent.parent
+    proj_root = Path(__file__).parent.parent.parent
     fig_dir   = proj_root / 'figures' / args.track
     fig_dir.mkdir(parents=True, exist_ok=True)
     suffix = 'pareto_comparison.png'

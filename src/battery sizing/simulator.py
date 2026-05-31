@@ -30,7 +30,10 @@ import matplotlib.patches as patches
 from matplotlib.transforms import Affine2D
 import matplotlib.patheffects as pe
 
-sys.path.insert(0, os.path.dirname(__file__))
+_this = os.path.dirname(os.path.abspath(__file__))
+_sl   = os.path.join(os.path.dirname(_this), 'single lap')
+sys.path.insert(0, _sl)
+sys.path.insert(0, _this)
 
 from track import get_track, Track, TRACK_GENERATORS
 from car import BicycleModel, CarState, CarParams
@@ -467,7 +470,7 @@ def main():
     parser.add_argument('--figure-only', action='store_true', help='Only generate static figure')
     args = parser.parse_args()
 
-    proj_root = Path(__file__).parent.parent
+    proj_root = Path(__file__).parent.parent.parent
 
     print("=" * 60)
     print("  EV Optimal Line Racing Simulator")

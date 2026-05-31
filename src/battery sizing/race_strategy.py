@@ -34,7 +34,10 @@ import matplotlib.gridspec as gridspec
 from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 
-sys.path.insert(0, os.path.dirname(__file__))
+_this = os.path.dirname(os.path.abspath(__file__))
+_sl   = os.path.join(os.path.dirname(_this), 'single lap')
+sys.path.insert(0, _sl)
+sys.path.insert(0, _this)
 
 from car import CarParams
 from track import get_track
@@ -80,37 +83,105 @@ def compute_scp_pareto(track, params, n_pts=20, w_max=8.0):
 
     Each Pareto point corresponds to a geometrically different line:
     high energy weight → tighter cornering, lower speed, less drag.
-    This is the physically correct Phase 4 line-choice model.
+
+    T and E are evaluated at FULL track resolution after each SCP step
+    (via the same forward-backward speed profile as the grip proxy) so
+    that both methods share a consistent physical scale.
 
     Returns param_arr (normalized [0,1]), T_arr (s), E_arr (Wh).
     Sorted by T ascending for use in KKT and NLP interpolation.
     """
-    from optimizer import (solve_scp, compute_joint_pareto,
+    from optimizer import (solve_scp, solve_scp_pareto_joint,
                            alpha_to_raceline, compute_curvature_from_path)
     from scipy.optimize import minimize as sp_min
+    from scipy.interpolate import interp1d
+    from scipy.ndimage import uniform_filter1d
+    from battery_sizing import compute_lap_energy_time
 
-    n_full     = len(track.centerline)
-    idx        = np.linspace(0, n_full - 1, 80, dtype=int)
-    centerline = track.centerline[idx]
-    normals    = track.normals[idx]
-    widths     = track.widths[idx]
+    n_full = len(track.centerline)
+    n_scp  = 80
+    idx    = np.linspace(0, n_full - 1, n_scp, dtype=int)
+    c_sub  = track.centerline[idx]
+    n_sub  = track.normals[idx]
+    w_sub  = track.widths[idx]
 
-    # Warm-start from min-curvature line (same as run_analysis.py)
-    bounds = [(-w, w) for w in widths]
+    # Warm-start from min-curvature line
+    bounds = [(-w, w) for w in w_sub]
     def curv_obj(a):
-        path = alpha_to_raceline(a, centerline, normals)
+        path = alpha_to_raceline(a, c_sub, n_sub)
         k    = compute_curvature_from_path(path)
         da   = np.diff(a, append=a[0])
         return float(np.sum(k**2) + 1e-5 * np.sum(da**2))
-    res_w = sp_min(curv_obj, np.zeros(len(widths)), method='SLSQP',
+    res_w = sp_min(curv_obj, np.zeros(n_scp), method='SLSQP',
                    bounds=bounds, options={'maxiter': 2000, 'ftol': 1e-12, 'disp': False})
 
     print("  [joint SCP 1/2] Min-time racing line (alpha + v)...")
-    alpha_t, v_t, _ = solve_scp(centerline, normals, widths, params, alpha0=res_w.x)
+    alpha_t, v_t, _ = solve_scp(c_sub, n_sub, w_sub, params, alpha0=res_w.x)
 
-    print("  [joint SCP 2/2] Energy-weight Pareto sweep...")
-    return compute_joint_pareto(centerline, normals, widths, params, alpha_t, v_t,
-                                 w_max=w_max, n_pts=n_pts)
+    # Interpolate 80-pt alpha to full resolution, evaluate T and E with the
+    # same forward-backward speed model as the grip proxy (grip_fraction=0.85).
+    t_sub  = np.linspace(0, 1, n_scp)
+    t_full = np.linspace(0, 1, n_full)
+    smooth = max(3, n_full // n_scp)
+
+    def _full_T_E(alpha_sub):
+        alpha_f = interp1d(t_sub, alpha_sub, kind='cubic',
+                           fill_value='extrapolate')(t_full)
+        alpha_f = np.clip(alpha_f, -track.widths, track.widths)
+        alpha_f = uniform_filter1d(alpha_f, size=smooth, mode='wrap')
+        raceline = alpha_to_raceline(alpha_f, track.centerline, track.normals)
+        T, E, _, _ = compute_lap_energy_time(raceline, params, grip_fraction=0.85)
+        return T, E
+
+    # SCP-internal reference scales (for LP objective)
+    path0  = alpha_to_raceline(alpha_t, c_sub, n_sub)
+    ds0    = np.linalg.norm(np.diff(path0, axis=0, append=path0[0:1]), axis=1)
+    v_s0   = np.maximum(v_t, 1e-3)
+    T_ref_scp = float(np.sum(ds0 / v_s0))
+    dt0    = ds0 / v_s0
+    dv0    = np.roll(v_t, -1) - np.roll(v_t, 1)
+    a0     = dv0 / (2 * np.maximum(dt0, 1e-6))
+    F_d0   = 0.5 * params.rho * params.C_d * params.A_front * v_t**2
+    F_t0   = params.mass * a0 + F_d0 + params.C_roll * params.mass * 9.81
+    P_m0   = F_t0 * v_t
+    E_ref_scp = float(np.sum((np.maximum(P_m0, 0) / params.eta_motor
+                               + np.minimum(P_m0, 0) * params.eta_regen) * dt0)) / 3600.0
+
+    print("  [joint SCP 2/2] Energy-weight Pareto sweep (full-res evaluation)...")
+    w_arr  = np.concatenate([[0.0], np.geomspace(1e-2, w_max, n_pts - 1)])
+    T_list, E_list = [], []
+    alpha_c, v_c = alpha_t.copy(), v_t.copy()
+
+    n_sweep = len(w_arr) - 1
+    for i, w in enumerate(w_arr, 0):
+        if i > 0:
+            alpha_c, v_c, _, _ = solve_scp_pareto_joint(
+                c_sub, n_sub, w_sub, params, alpha_c, v_c,
+                w_energy=w, T_ref=T_ref_scp, E_ref=E_ref_scp,
+                rho=2.0, eps=5e-3, max_iters=12)
+        T_i, E_i = _full_T_E(alpha_c)
+        T_list.append(T_i)
+        E_list.append(E_i)
+        if i > 0:
+            print(f"    w={w:.3f}  ({i}/{n_sweep})  T={T_i:.2f}s  E={E_i:.1f}Wh  TxE={T_i*E_i:.1f}")
+
+    T_arr = np.array(T_list)
+    E_arr = np.array(E_list)
+    idx_s = np.argsort(T_arr)
+    T_arr, E_arr = T_arr[idx_s], E_arr[idx_s]
+    nd_idx = []
+    min_E  = np.inf
+    for i in range(len(T_arr)):
+        if E_arr[i] < min_E:
+            min_E = E_arr[i]
+            nd_idx.append(i)
+    T_arr    = T_arr[nd_idx]
+    E_arr    = E_arr[nd_idx]
+    n_kept   = len(nd_idx)
+    if n_kept < n_pts:
+        print(f"  [Pareto] {n_pts - n_kept} dominated point(s) removed, {n_kept} kept.")
+    param_arr = np.linspace(0.0, 1.0, n_kept)
+    return param_arr, T_arr, E_arr
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +662,7 @@ def main():
     args = parser.parse_args()
 
     from pathlib import Path
-    proj_root = Path(__file__).parent.parent
+    proj_root = Path(__file__).parent.parent.parent
 
     print("=" * 65)
     print("  Phase 4 - Race Strategy Co-optimisation")

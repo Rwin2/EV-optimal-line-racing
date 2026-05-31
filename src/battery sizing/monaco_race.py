@@ -25,7 +25,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-sys.path.insert(0, os.path.dirname(__file__))
+_this = os.path.dirname(os.path.abspath(__file__))
+_sl   = os.path.join(os.path.dirname(_this), 'single lap')
+sys.path.insert(0, _sl)
+sys.path.insert(0, _this)
 
 from car import CarParams
 from track import get_track
@@ -244,7 +247,7 @@ def main():
                         choices=['min_laptime', 'center'], help='Racing line')
     args = parser.parse_args()
 
-    proj_root = Path(__file__).parent.parent
+    proj_root = Path(__file__).parent.parent.parent
 
     print("=" * 65)
     print("  EV Race Simulation — Optimal Line Racing")

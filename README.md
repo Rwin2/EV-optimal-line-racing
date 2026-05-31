@@ -16,21 +16,26 @@ Optimal racing line optimization for electric vehicles on closed circuits, with 
 ```text
 EV-optimal-line-racing/
 ├── src/
-│   ├── track.py            # Track geometry (7 circuits: oval, complex, monza, ...)
-│   ├── car.py              # Vehicle physics: bicycle model + EV battery/motor
-│   ├── optimizer.py        # SCP joint path+speed optimizer + SCP Pareto
-│   ├── simplex.py          # Simplex LP solver (Ch 12, course reader)
-│   ├── optimizer_ipopt.py  # IPOPT speed optimizer (CasADi, for benchmarking)
-│   ├── controller.py       # Online controllers (Pure Pursuit, iLQR)
-│   ├── simulator.py        # Single-lap race simulator with video rendering
-│   ├── run_analysis.py     # Full analysis: convergence + Pareto figures
-│   ├── pareto_frontier.py  # IPOPT Pareto frontier (for benchmarking)
-│   ├── battery_sizing.py   # Phase 1 — multi-lap battery sizing sweep
-│   ├── monaco_race.py      # Phase 1 — 51-lap Grand Prix E-Prix simulation
-│   ├── race_strategy.py    # Phase 4 — race strategy co-optimization
-│   ├── compare_circuits.py # Cross-circuit comparison figure
-│   └── compare_methods.py  # Pareto method comparison: grip proxy vs joint SCP
-├── src_single_lap/         # Backup of original single-lap codebase
+│   ├── single lap/             # Single-lap analysis (SCP optimizer, iLQR, simulator)
+│   │   ├── track.py                # Track geometry (7 circuits)
+│   │   ├── car.py                  # Vehicle physics: bicycle model + EV battery/motor
+│   │   ├── optimizer.py            # SCP joint path+speed optimizer + SCP Pareto
+│   │   ├── simplex.py              # Simplex LP solver (Ch 12, course reader)
+│   │   ├── optimizer_ipopt.py      # IPOPT speed optimizer (CasADi, for benchmarking)
+│   │   ├── controller.py           # Online controllers (Pure Pursuit, iLQR)
+│   │   ├── simulator.py            # Single-lap race simulator with video rendering
+│   │   ├── run_analysis.py         # Full analysis: convergence + Pareto figures
+│   │   └── pareto_frontier.py      # IPOPT Pareto frontier (for benchmarking)
+│   └── battery sizing/         # Multi-lap battery sizing + race strategy
+│       ├── car.py                  # Extended car model (mass = m_chassis + Q_batt/e_spec)
+│       ├── optimizer.py            # SCP + solve_scp_pareto_joint (joint Pareto)
+│       ├── pareto_frontier.py      # Car-params-aware cache key
+│       ├── simulator.py            # Multi-lap simulator
+│       ├── battery_sizing.py       # Phase 1 — battery sizing sweep
+│       ├── monaco_race.py          # Phase 1 — multi-lap race simulation
+│       ├── race_strategy.py        # Phase 4 — race strategy co-optimization
+│       ├── compare_circuits.py     # Cross-circuit comparison figure
+│       └── compare_methods.py      # Pareto method comparison: grip proxy vs joint SCP
 ├── figures/                # Generated figures (per-circuit subfolders)
 ├── references/             # Course reader + papers
 ├── report/                 # LaTeX (proposal, status update)
@@ -125,26 +130,32 @@ EV-optimal-line-racing/
 
 ```bash
 # Full single-lap analysis (convergence + Pareto figures)
-python src/run_analysis.py
+python "src/single lap/run_analysis.py"
 
-# Battery sizing sweep — 51 laps
-python src/battery_sizing.py --track complex --laps 51 --Q-min 15 --Q-max 80
+# Battery sizing sweep
+python "src/battery sizing/battery_sizing.py" --track complex --laps 51 --Q-min 15 --Q-max 80
+python "src/battery sizing/battery_sizing.py" --track monaco  --laps 72 --Q-min 20 --Q-max 80
 
-# 51-lap race simulation at optimal Q*
-python src/monaco_race.py --laps 51
+# Multi-lap race simulation at optimal Q*
+python "src/battery sizing/monaco_race.py" --track complex --laps 51 --Q-batt 36.9
+python "src/battery sizing/monaco_race.py" --track monza   --laps 58 --Q-batt 31.7
+python "src/battery sizing/monaco_race.py" --track hairpin --laps 51 --Q-batt 31.7
+python "src/battery sizing/monaco_race.py" --track monaco  --laps 72 --Q-batt 38.3
 
 # Phase 4: Race strategy co-optimization (joint SCP Pareto)
-python src/race_strategy.py --track complex --Q-batt 36.9 --pareto-method scp --no-nlp --T-max-pct 15
-python src/race_strategy.py --track monza   --Q-batt 31.7 --pareto-method scp --no-nlp --T-max-pct 15
-python src/race_strategy.py --track hairpin --Q-batt 31.7 --pareto-method scp --no-nlp --T-max-pct 15
+python "src/battery sizing/race_strategy.py" --track complex --Q-batt 36.9 --pareto-method scp --no-nlp --T-max-pct 15
+python "src/battery sizing/race_strategy.py" --track monza   --Q-batt 31.7 --pareto-method scp --no-nlp --T-max-pct 15
+python "src/battery sizing/race_strategy.py" --track hairpin --Q-batt 31.7 --pareto-method scp --no-nlp --T-max-pct 15
+python "src/battery sizing/race_strategy.py" --track monaco  --Q-batt 38.3 --pareto-method scp --no-nlp --T-max-pct 15
 
 # Pareto method comparison: grip proxy vs joint SCP
-python src/compare_methods.py --track complex --Q-batt 36.9 --T-max-pct 15
-python src/compare_methods.py --track monza   --Q-batt 31.7 --T-max-pct 15
-python src/compare_methods.py --track hairpin --Q-batt 31.7 --T-max-pct 15
+python "src/battery sizing/compare_methods.py" --track complex --Q-batt 36.9 --T-max-pct 15
+python "src/battery sizing/compare_methods.py" --track monza   --Q-batt 31.7 --T-max-pct 15
+python "src/battery sizing/compare_methods.py" --track hairpin --Q-batt 31.7 --T-max-pct 15
+python "src/battery sizing/compare_methods.py" --track monaco  --Q-batt 38.3 --T-max-pct 15
 
 # Cross-circuit comparison figure (reads JSON results from figures/<track>/)
-python src/compare_circuits.py
+python "src/battery sizing/compare_circuits.py"
 ```
 
 ---
@@ -161,15 +172,16 @@ python src/compare_circuits.py
 | Joint SCP Pareto: +3s | 34% energy saved |
 | Joint SCP Pareto: T spread | 127% (38s → 86s per lap) |
 
-### Phase 1 — Battery sizing & 51-lap race (Grand Prix Circuit, Formula E Gen3 baseline)
+### Phase 1 — Battery sizing & multi-lap race (Formula E Gen3 baseline)
 
-| Metric | Value |
-| --- | --- |
-| Car model | Formula E Gen3 (m_chassis=640 kg, P_max=300 kW) |
-| Motor efficiency | Parabolic η(P): peak 95% at 60% load |
-| Q* (minimum feasible) | 36.9 kWh → total mass 824 kg |
-| Avg lap time | 51.5 s |
-| Race result | 51/51 laps, SoC_final = 7.4% |
+Car model: m_chassis=640 kg, P_max=300 kW, parabolic η(P): peak 95% at 60% load
+
+| Circuit | Track key | Length | Laps | Race dist. | Q* | Mass | Avg lap | SoC final |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Grand Prix Circuit | `complex` | 1288 m | 51 | 65.7 km | 36.9 kWh | 824 kg | 51.5 s | 7.4% |
+| Monza-Style | `monza` | 1115 m | 58 | 64.7 km | 31.7 kWh | 798 kg | 54.4 s | 5.4% |
+| Hairpin & Chicane | `hairpin` | 1269 m | 51 | 64.7 km | 31.7 kWh | 798 kg | 63.2 s | 7.1% |
+| Sharp Corner Circuit | `monaco` | 903 m | 72 | 65.0 km | 38.3 kWh | 832 kg | 45.9 s | 8.4% |
 
 ### Phase 4 — Race strategy co-optimization (Grand Prix Circuit, 50 laps)
 
@@ -184,11 +196,8 @@ python src/compare_circuits.py
 
 ### Cross-circuit comparison (`figures/comparison_circuits.png`)
 
-| Circuit | Track key | Length | Laps | Race dist. | Q* | Avg lap | SoC final |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Monaco (Grand Prix) | `complex` | 1288 m | 51 | 65.7 km | 36.9 kWh | 51.5 s | 7.4% |
-| Monza-Style | `monza` | 1115 m | 58 | 64.7 km | 31.7 kWh | 54.4 s | 5.4% |
-| Hairpin & Chicane | `hairpin` | 1269 m | 51 | 64.7 km | 31.7 kWh | 63.2 s | 7.1% |
+Compares Grand Prix Circuit, Monza-Style, and Hairpin & Chicane at ~65 km race distance.
+See Phase 1 results table above for full per-circuit breakdown.
 
 ### Circuits available
 

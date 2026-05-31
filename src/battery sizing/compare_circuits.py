@@ -16,7 +16,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-sys.path.insert(0, os.path.dirname(__file__))
+_this = os.path.dirname(os.path.abspath(__file__))
+_sl   = os.path.join(os.path.dirname(_this), 'single lap')
+sys.path.insert(0, _sl)
+sys.path.insert(0, _this)
 
 from track import get_track
 from car import CarParams
@@ -241,7 +244,7 @@ def plot_comparison(circuits, output_path=None):
 
 def main():
     from pathlib import Path
-    proj_root = str(Path(__file__).parent.parent)
+    proj_root = str(Path(__file__).parent.parent.parent)
 
     print("=" * 60)
     print("  Circuit Comparison Figure")
