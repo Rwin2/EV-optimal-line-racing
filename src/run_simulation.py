@@ -1,12 +1,15 @@
 """
-3-car race simulation with optional per-step grip perturbation.
+3-car race simulation on the Monza circuit (bicycle model).
 
 Cars:
   1. Baseline  — follows centerline, curvature-based speed
-  2. Nominal   — follows optimized raceline + speed profile (deterministic μ)
-  3. Robust    — follows robust raceline + speed profile (SAA, uncertain μ)
+  2. Nominal   — follows optimized raceline + speed profile (deterministic mu)
+  3. Robust    — follows robust raceline + speed profile (SAA, uncertain mu)
 
-All cars use iLQR trajectory tracking.
+All cars use Stanley + TV-LQR trajectory tracking with the bicycle model.
+
+CLI options:
+  --no-perturb   deterministic mu (no stochastic perturbation)
 
 Outputs: GIF + race metrics.
 """
@@ -22,17 +25,17 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from track import get_track
 from car import BicycleModel, CarState, CarParams
-from controller import ILQRController
+from controller import SpatialTVLQRController
 from optimizer import (alpha_to_raceline, compute_curvature_from_path,
                        compute_velocity_profile)
 from simulator import simulate_race, render_video
 from scipy.interpolate import interp1d
 
-TRACK = "monaco"
+TRACK = "monza"
 N_STATIONS = 40
 MU_SIGMA = 0.10
 DT = 0.02
-MAX_TIME = 90.0
+MAX_TIME = 120.0
 FPS = 15
 SEED = 123
 
@@ -42,7 +45,7 @@ CACHE_DIR = os.path.join(PROJ_ROOT, "cache")
 
 
 def interpolate_to_full(alpha_sub, v_sub, trk, n_sub):
-    """Interpolate subsampled (α, v) back to the full-resolution track."""
+    """Interpolate subsampled (alpha, v) back to the full-resolution track."""
     n_full = len(trk.centerline)
     t_sub = np.linspace(0, 1, n_sub)
     t_full = np.linspace(0, 1, n_full)
@@ -59,6 +62,28 @@ def interpolate_to_full(alpha_sub, v_sub, trk, n_sub):
     return raceline, v_full
 
 
+def make_car_model(params, perturb=False, mu_sequence=None):
+    """Create a bicycle model, optionally with per-step mu perturbation."""
+    if perturb and mu_sequence is not None:
+        class PerturbedModel(BicycleModel):
+            def __init__(self, params, mu_seq):
+                super().__init__(CarParams(**{f.name: getattr(params, f.name)
+                                 for f in params.__dataclass_fields__.values()}))
+                self.mu_seq = mu_seq
+                self._step_count = 0
+
+            def step(self, state, delta, F_drive, dt=0.01):
+                idx = min(self._step_count, len(self.mu_seq) - 1)
+                self.p.mu = self.mu_seq[idx]
+                self._step_count += 1
+                return super().step(state, delta, F_drive, dt)
+
+        return PerturbedModel(params, mu_sequence)
+    else:
+        return BicycleModel(CarParams(**{f.name: getattr(params, f.name)
+                          for f in params.__dataclass_fields__.values()}))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--no-perturb', action='store_true',
@@ -68,11 +93,13 @@ def main():
 
     mode_str = "Grip Perturbation" if perturb else "Deterministic (no perturbation)"
     print("=" * 60)
-    print(f"  3-Car Race Simulation — {mode_str}")
+    print(f"  3-Car Race — bicycle model, {mode_str}")
     print("=" * 60)
 
     # Load optimization results
-    cache_path = os.path.join(CACHE_DIR, 'optimization_results.npz')
+    cache_path = os.path.join(CACHE_DIR, 'optimization_results_monza.npz')
+    if not os.path.exists(cache_path):
+        cache_path = os.path.join(CACHE_DIR, 'optimization_results.npz')
     if not os.path.exists(cache_path):
         print("ERROR: Run run_analysis.py first to generate optimization_results.npz")
         return
@@ -96,27 +123,26 @@ def main():
     # Baseline speed profile: conservative curvature-based
     kappa_center = compute_curvature_from_path(rl_center)
     v_center = compute_velocity_profile(rl_center, kappa_center, CarParams())
-    # Scale down for conservative baseline
     v_center = np.clip(v_center * 0.75, 5.0, CarParams().v_max * 0.85)
 
     print(f"    Nominal raceline: {len(rl_nom)} pts")
     print(f"    Robust raceline:  {len(rl_rob)} pts")
     print(f"    Baseline (center): {len(rl_center)} pts")
 
-    # Controllers — all iLQR
-    print("\n[2] Setting up iLQR controllers...")
+    # Controllers
+    print("\n[2] Setting up TV-LQR controllers...")
     params = CarParams()
 
-    print("    Computing iLQR gains for Baseline...")
-    ctrl_baseline = ILQRController(
+    print("    Computing TV-LQR gains for Baseline...")
+    ctrl_baseline = SpatialTVLQRController(
         trk, racing_line=rl_center, v_profile=v_center, params=params, dt=DT)
 
-    print("    Computing iLQR gains for Nominal...")
-    ctrl_nominal = ILQRController(
+    print("    Computing TV-LQR gains for Nominal...")
+    ctrl_nominal = SpatialTVLQRController(
         trk, racing_line=rl_nom, v_profile=v_nom_full, params=params, dt=DT)
 
-    print("    Computing iLQR gains for Robust...")
-    ctrl_robust = ILQRController(
+    print("    Computing TV-LQR gains for Robust...")
+    ctrl_robust = SpatialTVLQRController(
         trk, racing_line=rl_rob, v_profile=v_rob_full, params=params, dt=DT)
 
     controllers = [ctrl_baseline, ctrl_nominal, ctrl_robust]
@@ -124,43 +150,26 @@ def main():
     car_colors = ['#3399ff', '#ff3333', '#33cc66']
 
     # Car models
+    mu_sequence = None
     if perturb:
         rng = np.random.default_rng(SEED)
         max_steps = int(MAX_TIME / DT)
         mu_sequence = rng.normal(params.mu, MU_SIGMA, size=max_steps)
         mu_sequence = np.clip(mu_sequence, 0.3, 1.5)
 
-        class SharedMuBicycleModel(BicycleModel):
-            def __init__(self, params, mu_seq):
-                super().__init__(CarParams(**{f.name: getattr(params, f.name)
-                                 for f in params.__dataclass_fields__.values()}))
-                self.mu_seq = mu_seq
-                self._step_count = 0
+    car_models = [make_car_model(params, perturb, mu_sequence)
+                  for _ in range(3)]
 
-            def step(self, state, delta, F_drive, dt=0.01):
-                idx = min(self._step_count, len(self.mu_seq) - 1)
-                self.p.mu = self.mu_seq[idx]
-                self._step_count += 1
-                return super().step(state, delta, F_drive, dt)
-
-        car_models = [SharedMuBicycleModel(params, mu_sequence) for _ in range(3)]
-    else:
-        car_models = [
-            BicycleModel(CarParams(**{f.name: getattr(params, f.name)
-                         for f in params.__dataclass_fields__.values()}))
-            for _ in range(3)
-        ]
-
-    # Initial states: start each car on its reference trajectory
+    # Initial states
     initial_states = []
-    for i, ctrl in enumerate(controllers):
-        s0 = ctrl.s_bar[0]
+    for ctrl in controllers:
+        s0 = ctrl.s_ref[0]
         initial_states.append(CarState(
             x=s0[0], y=s0[1], psi=s0[2], vx=s0[3], SOC=1.0))
 
     # Simulate
-    mu_info = f"μ perturbed per step, σ={MU_SIGMA}" if perturb else "μ=1.0 (deterministic)"
-    print(f"\n[3] Simulating ({MAX_TIME}s, dt={DT}, {mu_info})...")
+    mu_info = f"mu perturbed, sigma={MU_SIGMA}" if perturb else "mu=1.0 (deterministic)"
+    print(f"\n[3] Simulating ({MAX_TIME}s, dt={DT}, bicycle, {mu_info})...")
     sim_data = simulate_race(trk, controllers, car_models, initial_states,
                               dt=DT, max_time=MAX_TIME, stop_after_laps=1)
     sim_time = sim_data['n_steps'] * DT
@@ -168,14 +177,17 @@ def main():
 
     # Results
     print("\n[4] Results:")
-    print(f"  {'Car':<16} {'Dist (m)':>9} {'Avg (km/h)':>11} {'Max (km/h)':>11} {'E used (%)':>11} {'Laps':>5}")
+    print(f"  {'Car':<16} {'Dist (m)':>9} {'Avg (km/h)':>11} {'Max (km/h)':>11} "
+          f"{'E used (%)':>11} {'Laps':>5}")
     print(f"  {'─'*65}")
     for i in range(3):
         m = sim_data['metrics'][i]
         print(f"  {car_names[i]:<16} {m['distance_m']:>8.0f} {m['avg_speed_kmh']:>10.1f} "
-              f"{m['max_speed_kmh']:>10.1f} {m['energy_used_pct']:>10.2f} {m['laps_completed']:>5d}")
+              f"{m['max_speed_kmh']:>10.1f} {m['energy_used_pct']:>10.2f} "
+              f"{m['laps_completed']:>5d}")
         if m['lap_times_s']:
-            print(f"  {'':16} Lap times: {', '.join(f'{t:.1f}s' for t in m['lap_times_s'])}")
+            print(f"  {'':16} Lap times: "
+                  f"{', '.join(f'{t:.1f}s' for t in m['lap_times_s'])}")
 
     # Render GIF
     print("\n[5] Rendering GIF...")

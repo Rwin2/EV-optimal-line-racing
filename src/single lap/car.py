@@ -1,11 +1,11 @@
 """
-Car dynamics module.
-Implements a planar bicycle model with longitudinal/lateral dynamics,
-tire friction, and EV battery/motor model.
+Car dynamics module — dynamic bicycle model for an EV race car.
+
+Exposes step(state, delta, F_drive, dt) → CarState.
 """
 
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -76,12 +76,8 @@ class BicycleModel:
         self.p = params or CarParams()
 
     def derivatives(self, state: CarState, delta: float, F_drive: float):
-        """
-        Compute state derivatives given steering and drive force inputs.
-        Returns CarState-like derivatives.
-        """
         p = self.p
-        vx = max(state.vx, 0.5)  # avoid division by zero at very low speed
+        vx = max(state.vx, 0.5)
         vy = state.vy
         omega = state.omega
 
@@ -92,14 +88,11 @@ class BicycleModel:
         # Lateral tire forces (linear model, capped by friction circle)
         F_yf = p.C_f * alpha_f
         F_yr = p.C_r * alpha_r
-
-        # Clamp lateral forces by friction circle
         F_yf = np.clip(F_yf, -p.mu * p.mass * 9.81 * 0.5, p.mu * p.mass * 9.81 * 0.5)
         F_yr = np.clip(F_yr, -p.mu * p.mass * 9.81 * 0.5, p.mu * p.mass * 9.81 * 0.5)
 
         # Clamp drive force
         F_drive = np.clip(F_drive, -p.F_brake_max, p.F_drive_max)
-        # Power limit
         if F_drive > 0 and F_drive * vx > p.P_max:
             F_drive = p.P_max / vx
 
@@ -121,8 +114,8 @@ class BicycleModel:
         if P_mech >= 0:
             P_elec = P_mech / p.eta_motor
         else:
-            P_elec = P_mech * p.eta_regen  # negative = charging
-        dSOC = -P_elec / (p.Q_batt * 3600 * 1000)  # kWh -> Ws
+            P_elec = P_mech * p.eta_regen
+        dSOC = -P_elec / (p.Q_batt * 3600 * 1000)
 
         return np.array([dx, dy, dpsi, dvx, dvy, domega, dSOC])
 
@@ -144,7 +137,6 @@ class BicycleModel:
         # Enforce constraints
         z_new[3] = max(z_new[3], 0.1)   # min speed
         z_new[6] = np.clip(z_new[6], self.p.SOC_min, 1.0)  # SOC bounds
-        # Wrap heading
-        z_new[2] = z_new[2] % (2 * np.pi)
+        z_new[2] = z_new[2] % (2 * np.pi)  # wrap heading
 
         return CarState.from_array(z_new)

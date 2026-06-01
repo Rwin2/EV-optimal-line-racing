@@ -5,9 +5,26 @@
 \usepackage{xcolor}
 \usepackage{url}
 \usepackage{placeins}
+\usepackage{caption}
 \graphicspath{{../figures/}{../figures/report/}}
-
-\newcommand{\new}[1]{#1}
+\setlength{\floatsep}{4pt plus 1pt minus 1pt}
+\setlength{\textfloatsep}{6pt plus 1pt minus 1pt}
+\setlength{\intextsep}{4pt plus 1pt minus 1pt}
+\setlength{\abovecaptionskip}{3pt}
+\setlength{\belowcaptionskip}{0pt}
+\setlength{\abovedisplayskip}{4pt plus 1pt minus 1pt}
+\setlength{\belowdisplayskip}{4pt plus 1pt minus 1pt}
+\captionsetup{font=small}
+\renewcommand{\baselinestretch}{0.92}\selectfont
+\setlength{\parskip}{0pt plus 0.5pt}
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {2ex plus 0.5ex minus 0.5ex}{0.8ex plus 0.2ex}%
+  {\normalfont\large\bfseries\centering}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {1.5ex plus 0.3ex minus 0.3ex}{0.5ex plus 0.1ex}%
+  {\normalfont\normalsize\bfseries}}
+\makeatother
 
 \title{Optimal Racing Line, Energy Management, and Race Strategy for Electric Vehicles under Uncertain Grip}
 
@@ -24,22 +41,7 @@
 \maketitle
 
 \begin{abstract}
-\new{%
-Autonomous electric racing demands joint optimization of trajectory, energy management, and race
-strategy --- challenges compounded by uncertain tire grip and the nonlinear coupling between
-battery mass and energy consumption.
-We present a five-stage hierarchical framework: (1)~time-optimal racing line computation via a
-custom Sequential Convex Programming (SCP) algorithm with a hand-coded Simplex solver;
-(2)~Pareto-front analysis of the lap-time/energy tradeoff; (3)~sampled worst-case robustification
-under uncertain grip; (4)~battery sizing for multi-lap races under mass-energy coupling; and
-(5)~race strategy co-optimization with a closed-form Karush-Kuhn-Tucker (KKT) solution for line choice and pace
-management.
-SCP converges 12$\times$ faster than SLSQP while reaching a comparable solution.
-Grip uncertainty imposes a $\sim$3\,s lap-time penalty at the time-optimal operating point, a cost
-that diminishes as energy efficiency is prioritized.
-Pace management reduces the minimum feasible battery capacity by 32\% through a
-closed-form KKT strategy, assuming identical conditions across all laps.%
-}
+Autonomous racing pushes the limits of control and optimization, requiring vehicles to navigate circuits at the edge of their physical capabilities. For electric vehicles, performance is further constrained by battery energy, making the racing line problem inherently multiobjective, let alone tire grip uncertainty during the race paving the way for a robust stochastic optimization. We formulate the joint optimization of racing line and speed profile on closed circuits and solve it through five stages. First, we compute the time-optimal trajectory using a custom Sequential Convex Programming (SCP) algorithm with a hand-coded Simplex solver, validated against scipy's Sequential Least Squares Programming (SLSQP). Second, we trace the Pareto front between lap time and energy consumption via a weighted-sum formulation. Third, we extend the optimization to uncertain tire grip using Sample Average Approximation (SAA). Then to push beyond this, we model a mass-coupled system taking into account the mass of the battery with (4) battery sizing for multi-lap races under mass-energy coupling, and (5) race strategy co-optimization (including energy, time, and battery sizing) with a closed-form Karush--Kuhn--Tucker (KKT) solution for line choice and pace management. A final layer of optimization is performed implementing a TV-LQR controller for trajectory tracking on the optimal trajectory to ensure dynamic feasibility. We test our pipeline on three different race circuits. Our SCP solution converges in 12$\times$ fewer iterations than SLSQP while reaching a comparable solution. Grip uncertainty imposes a ${\sim}$10\% lap-time penalty at the time-optimal operating point to produce a control that is robust through sliding and grip uncertainty, especially because grip uncertainty also strongly diminishes energy efficiency. Pace management reduces the minimum feasible battery capacity by 32\% through a closed-form KKT strategy under the same race strategy across multi-lap races.
 \end{abstract}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -59,23 +61,23 @@ driving strategies preserve battery charge at the cost of slower lap times. This
 particularly relevant in modern electric racing series such as Formula~E~\cite{Sciarretta2007} and
 in autonomous racing applications.
 
-This work addresses the central question: \emph{how should an electric autonomous race vehicle
-jointly optimize its trajectory, energy management, robustness to grip uncertainty, and race
-strategy?} We formulate a hierarchical optimization framework that progressively extends from
-minimum-time single-lap control to full race management. We study the tradeoff between lap time
-and energy consumption and analyze the impact of uncertain tire grip through a robust optimization
-framework, \new{extending the single-lap analysis to full race management through battery sizing
-and strategy co-optimization.}
+This project investigates the computation of optimal racing trajectories for electric vehicles
+under both deterministic and uncertain operating conditions. We formulate the problem as a
+nonlinear optimization over the racing line and speed profile and study the tradeoff between lap
+time and energy consumption. We further analyze the impact of uncertain tire grip through a robust
+optimization framework.
 
-\new{The framework spans five stages: trajectory design via SCP with a custom Simplex solver,
-multi-objective Pareto analysis, sampled worst-case robustification under uncertain grip,
-race-level battery sizing with mass-energy coupling, and closed-form KKT race strategy.
-Stages 1--3 use a fixed-mass kinematic model for trajectory optimization; Stages 4--5 switch to a
-mass-coupled battery model to capture the energy--mass coupling at race scale.
-Experiments are conducted on four procedurally generated circuits (Appendix~\ref{app:circuits}).}
-The optimized trajectories are subsequently tracked using a dynamic bicycle model and a
-Time-Varying Linear Quadratic Regulator (TV-LQR) to evaluate feasibility in closed-loop
-simulation.
+Our approach is organized into five stages: (1)~time-optimal racing line optimization using a
+kinematic vehicle model and Sequential Convex Programming (SCP), (2)~multi-objective optimization
+of lap time and energy consumption through Pareto front analysis, and (3)~robust optimization
+under uncertain tire-road friction using Sample Average Approximation (SAA). Stages 1--3 use a
+fixed-mass kinematic model for trajectory optimization. Then for more realistic vehicle dynamics,
+we model a mass-varying battery as it acts on the total energy available to the vehicle but also
+increases energy consumption during the race. Hence the two last stages are (4) battery sizing
+with mass-energy coupling, and (5) closed-form KKT race strategy. All circuits used in this study
+are described in Appendix~\ref{app:circuits}. The optimized trajectories are subsequently tracked
+using a dynamic bicycle model and a Time-Varying Linear Quadratic Regulator (TV-LQR) to evaluate
+their feasibility in closed-loop simulation.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Problem Formulation}
@@ -101,7 +103,7 @@ vector is $\mathbf{x} = (\boldsymbol{\alpha}, \mathbf{v}) \in \mathbb{R}^{2n}$.
 
 \begin{figure}[h]
   \centering
-  \includegraphics[width=0.5\linewidth]{decision_variables.png}
+  \includegraphics[width=0.30\linewidth]{decision_variables.png}
   \caption{Track parameterization and optimization variables. The lateral offset $\alpha_i$
   displaces each path point from the centerline $\mathbf{c}_i$ along the normal $\hat{\mathbf{n}}_i$.
   The speed $v_i$ is along the tangent; $w_i$ bounds the feasible region.}
@@ -116,7 +118,7 @@ the available tire friction:
 \begin{equation}\label{eq:cornering}
   v_i^2 \, |\kappa_i(\boldsymbol{\alpha})| \leq 0.85\,\mu \, g
 \end{equation}
-where 0.85 is a safety margin. Between consecutive stations, longitudinal dynamics are bounded by
+where $\kappa_i$ is the path curvature at station $i$ and 0.85 is a safety margin. Between consecutive stations, longitudinal dynamics are bounded by
 the vehicle's acceleration and braking capabilities:
 \begin{equation}\label{eq:accel}
   v_{i+1}^2 \leq v_i^2 + 2\,a_{\text{lon}}\,\Delta s_i, \quad
@@ -159,16 +161,17 @@ current iterate (see Appendix~\ref{app:scp} for full expressions). The bounds $(
 We solve this LP with a two-phase Simplex algorithm implemented from scratch
 following~\cite{Kochenderfer2019}; a custom solver gives direct control over the trust-region
 stopping criterion and avoids the overhead of general-purpose LP interfaces. The curvature
-Jacobian $\partial\kappa_i / \partial\alpha_j$ is computed with JAX automatic differentiation. With $n = 80$ stations, the LP sub-problem involves $2n = 160$
+Jacobian $\partial\kappa_i / \partial\alpha_j$ is computed with JAX automatic differentiation. With $n = 80$ stations, which denote the number of discretization points chosen for the decision variables, the LP sub-problem involves $2n = 160$
 decision variables and $3n$ linear constraints, keeping each iteration computationally lightweight
 compared to a full nonlinear solve.
 
-The trust region radius $\rho$ adapts at each iteration: halved when the step causes large
-constraint violations, grown by a factor of 1.2 when the step improves the objective. To validate
-the SCP solution, we solve the same problem with scipy's SLSQP. \new{On the Monza-style circuit (80
-stations, 1115\,m), SCP converges from a curvature-minimizing warm start at 44.5\,s to 35.9\,s in
-15 iterations, while SLSQP requires approximately 180 iterations to reach 35.4\,s, consistent with
-both solvers converging toward a similar optimum.}
+The trust region radius $\rho$ adapts at each iteration, halved when the step causes large
+constraint violations and grown by a factor of 1.2 when the step improves the objective. To validate
+the SCP solution, we solve the same problem with scipy's SLSQP. On the Monza-style circuit
+(Appendix~\ref{app:circuits}, 80 stations, 1115\,m), SCP converges from a curvature-minimizing
+warm start at 44.5\,s to 35.9\,s in 15 iterations, while SLSQP requires approximately 180
+iterations to reach 35.4\,s, consistent with both solvers converging toward a qualitatively similar
+optimum.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Time-Energy Pareto Optimization}
@@ -209,49 +212,49 @@ This reduces $N \times n$ scenario constraints to $n$ deterministic constraints 
 making the robust problem no more expensive than the nominal one.
 
 % ─────────────────────────────────────────────────────────────────────────────
-\section{\new{Battery Sizing for Multi-Lap Racing}}\label{sec:sizing}
+\section{Battery Sizing for Multi-Lap Racing}\label{sec:sizing}
 % ─────────────────────────────────────────────────────────────────────────────
 
-\new{For a full race, the battery must supply enough energy to complete all laps above
+For a full race, the battery must supply enough energy to complete all laps above
 $\mathrm{SoC}_{\min} = 5\%$. Since pack weight enters vehicle mass directly ($m = m_{\rm chassis} + Q_{\rm batt} / e_{\rm spec}$), a larger battery both increases available energy and raises per-lap consumption, coupling the sizing and performance problems.
 We sweep $Q_{\rm batt} \in [15, 80]$\,kWh; at each point, we simulate the lap energy $E_{\rm lap}$ from the kinematic speed profile
-using a parabolic motor efficiency map (peak $\eta = 0.95$ at 60\% rated power). A pack is feasible when}
+using a parabolic motor efficiency map (peak $\eta = 0.95$ at 60\% rated power). A pack is feasible when
 \begin{equation}\label{eq:feasibility}
   Q_{\rm batt}\,(1 - \mathrm{SoC}_{\min}) \;\geq\; n_{\rm laps} \cdot E_{\rm lap}(Q_{\rm batt})
 \end{equation}
-\new{and the minimum feasible capacity $Q^* = \min\{Q_{\rm batt} : \text{feasible}\}$ is the design target.}
+and the minimum feasible capacity $Q^* = \min\{Q_{\rm batt} : \text{feasible}\}$ is the design target.
 
 % ─────────────────────────────────────────────────────────────────────────────
-\section{\new{Race Strategy Co-Optimization}}\label{sec:strategy}
+\section{Race Strategy Co-Optimization}\label{sec:strategy}
 % ─────────────────────────────────────────────────────────────────────────────
 
-\new{We introduce two per-lap decision variables: a Pareto operating point $g \in [g_{\min},
+We introduce two per-lap decision variables: a Pareto operating point $g \in [g_{\min},
 g_{\max}]$ controlling cornering aggressiveness, and a pace factor $p \in [p_{\min}, 1]$ scaling
 speed uniformly. Lap time and energy scale as $T_{\rm lap} = T_{\rm base}(g)/p$ and
-$E_{\rm lap} = E_{\rm base}(g)\,p$, subject to the global energy budget:}
+$E_{\rm lap} = E_{\rm base}(g)\,p$, subject to the global energy budget:
 \begin{equation}\label{eq:energy_constraint}
   \sum_{t=1}^{n} E_{\rm base}(g_t)\,p_t \;\leq\; Q_{\rm batt}(1 - \mathrm{SoC}_{\min})
 \end{equation}
 
-\new{For a symmetric race, KKT stationarity and complementary slackness~\cite{Kochenderfer2019}
+For a symmetric race, KKT stationarity and complementary slackness~\cite{Kochenderfer2019}
 lead to a closed-form structure of the optimum. The energy constraint is active at optimality, and
-the optimal racing line minimizes the coupled time--energy metric:}
+the optimal racing line minimizes the coupled time--energy metric:
 \begin{equation}\label{eq:kkt}
   g^* = \arg\!\min_{g}\; T_{\rm base}(g)\,E_{\rm base}(g),
   \qquad
   p^* = \frac{Q_{\rm batt}(1-\mathrm{SoC}_{\min})}{n \cdot E_{\rm base}(g^*)}
 \end{equation}
 
-\new{with $p^*$ clipped to $[p_{\min}, 1]$ and subject to the competitiveness constraint
+with $p^*$ clipped to $[p_{\min}, 1]$ and subject to the competitiveness constraint
 $T_{\rm base}(g) \leq 1.15\,T_{\min}$. An NLP validation (SLSQP) confirms a solution consistent
 with the constant $(g^*, p^*)$ structure predicted by the KKT conditions, supporting the closed-form
-result under symmetric-race assumptions.}
+result under symmetric-race assumptions.
 
-\new{This derivation relies on three key assumptions: (i) all laps are identical (symmetry);
+This derivation relies on three key assumptions: (i) all laps are identical (symmetry);
 (ii) linear scaling laws $T_{\rm lap} = T_{\rm base}/p$ and $E_{\rm lap} = E_{\rm base}\,p$,
 which are exact under uniform speed scaling but approximate when aerodynamic drag dominates; and
 (iii) the function $T_{\rm base}(g)\,E_{\rm base}(g)$ is unimodal over the feasible range, as
-consistently observed in numerical experiments.}
+consistently observed in numerical experiments.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Dynamic Trajectory Tracking}
@@ -277,7 +280,7 @@ to generate a dynamically feasible reference $(\bar{\mathbf{s}}_k, \bar{\mathbf{
 consistent with the bicycle model. Second, we linearize the dynamics around each reference point
 via finite differences to obtain $A_k = \partial f / \partial \mathbf{s}$ and
 $B_k = \partial f / \partial \mathbf{u}$, then solve the discrete Riccati equation backward to
-compute the TV-LQR gains $K_k$ (see Appendix~\ref{app:tvlqr}). Online, the control law is
+compute the TV-LQR gains $K_k$ (see Appendices~\ref{app:tvlqr} and~\ref{app:controller_algo} for the full algorithm). Online, the control law is
 \begin{equation}
   \mathbf{u}_k = \bar{\mathbf{u}}_k + K_k (\mathbf{s}_k - \bar{\mathbf{s}}_k)
 \end{equation}
@@ -290,116 +293,142 @@ state.
 
 \subsection{SCP vs SLSQP Convergence}
 
-\new{Figure~\ref{fig:convergence} shows the convergence of both solvers on the Monza-style circuit. Starting from a curvature-minimizing warm start at 44.5\,s, SCP reaches
+Figure~\ref{fig:convergence} shows the convergence of both solvers on the Monza-style circuit. Starting from a curvature-minimizing warm start at 44.5\,s, SCP reaches
 35.9\,s in 15 iterations while SLSQP requires approximately 180 iterations to reach 35.4\,s. The
 $\sim$0.5\,s gap is the expected cost of SCP's conservative trust region:
-it trades a small residual suboptimality for a 12$\times$ reduction in iterations.}
+it trades a small residual suboptimality for a 12$\times$ reduction in iterations.
 
 \begin{figure}[h!]
   \centering
-  \begin{subfigure}[t]{0.48\linewidth}
+  \begin{subfigure}[t]{0.42\linewidth}
     \includegraphics[width=\linewidth]{convergence_scp_vs_scipy.png}
-    \caption{\new{Convergence on the Monza-style circuit (80 stations, 1115\,m).}}
+    \caption{Convergence on the Monza-style circuit (80 stations, 1115\,m).}
     \label{fig:convergence}
   \end{subfigure}
   \hfill
-  \begin{subfigure}[t]{0.48\linewidth}
-    \includegraphics[width=\linewidth]{pareto_nominal_vs_robust.png}
-    \caption{Nominal and robust Pareto fronts (Monaco circuit).}
+  \begin{subfigure}[t]{0.42\linewidth}
+    \includegraphics[width=\linewidth]{pareto_nominal_vs_robust_monza.png}
+    \caption{Nominal and robust Pareto fronts (Monza-style circuit, Appendix~\ref{app:circuits}).}
     \label{fig:pareto}
   \end{subfigure}
-  \caption{\new{(a) SCP converges substantially faster than SLSQP while reaching a qualitatively similar solution.
+  \caption{(a) SCP converges substantially faster than SLSQP while reaching a qualitatively similar solution.
   (b) The robust Pareto front is shifted to longer lap times due to worst-case grip constraints;
-  the gap narrows for energy-efficient operating points.}}
+  the gap narrows for energy-efficient operating points.}
 \end{figure}
 
 \subsection{Time-Energy Pareto Front}
 
-Figure~\ref{fig:pareto} presents the nominal and robust Pareto fronts on the Monaco circuit. At $w = 0$, the nominal
-optimum reaches 27\,s (consistent with an independent SCP run on this circuit). As $w$ increases, the optimizer trades lap time for energy savings,
-reaching $\sim$44\,s at $w = 0.95$ with near-zero net energy. The robust front is shifted to
-longer lap times: at $w = 0$, the robust optimum is $\sim$30\, a 3\,s penalty that
-quantifies the cost of robustness. However, this penalty shrinks as energy becomes more important
-in the objective, since energy-efficient trajectories are inherently smoother with lower cornering
-loads, reducing the sensitivity to grip uncertainty.
+Figure~\ref{fig:pareto} presents the nominal Pareto front, which derives from the optimization
+problem without uncertainty, and the robust Pareto front, which derives from the stochastic
+optimization problem, both on the Monza-style circuit (Appendix~\ref{app:circuits}). At $w = 0$,
+the nominal optimum reaches ${\sim}$32\,s (consistent with an independent SCP run on this
+circuit). As $w$ increases, the optimizer trades lap time for energy savings, reaching
+${\sim}$70\,s at $w = 0.95$ with near-zero net energy. The robust front is shifted to longer lap
+times since at $w = 0$, the robust optimum is ${\sim}$36\,s, a 4\,s penalty that quantifies the
+cost of robustness. However, this penalty shrinks as energy becomes more important in the
+objective, since energy-efficient trajectories are inherently smoother with lower cornering loads,
+reducing the sensitivity to grip uncertainty.
 
 \subsection{Nominal vs Robust Trajectories}
 
-Figure~\ref{fig:nom_vs_rob} compares the nominal and robust racing lines and speed profiles. The
-geometric racing lines are nearly identical since curvature reduction is grip-independent. The
-robust speed profile, however, is consistently lower, reflecting the conservatism of the
-sampled worst-case grip constraint. Yet the profile retains the same shape and variations as the nominal
-one: the vehicle still accelerates on straights and brakes into corners, only at reduced
-magnitudes.
+Figure~\ref{fig:nom_vs_rob} compares the nominal and robust racing lines and speed profiles on the
+Monza-style circuit (Appendix~\ref{app:circuits}). The geometric racing lines are nearly identical
+since curvature reduction is grip-independent. The robust speed profile, however, is consistently
+lower, reflecting the conservatism of the sampled worst-case grip constraint. Yet the profile
+retains the same shape and variations as the nominal one since the vehicle still accelerates on
+straights and brakes into corners, only at reduced magnitudes.
 
 \begin{figure}[h!]
   \centering
-  \begin{subfigure}[t]{0.3\linewidth}
-    \includegraphics[width=\linewidth]{raceline_nom_vs_robust.png}
-    \caption{Racing lines on the track.}
+  \begin{subfigure}[t]{0.22\linewidth}
+    \includegraphics[width=\linewidth]{raceline_nom_vs_robust_monza.png}
+    \caption{Racing lines.}
   \end{subfigure}
   \hfill
-  \begin{subfigure}[t]{0.68\linewidth}
-    \includegraphics[width=\linewidth]{speed_profiles_nom_vs_robust.png}
-    \caption{Speed profiles along the track.}
+  \begin{subfigure}[t]{0.55\linewidth}
+    \includegraphics[width=\linewidth]{speed_profiles_nom_vs_robust_monza.png}
+    \caption{Speed profiles.}
   \end{subfigure}
   \caption{Nominal vs robust trajectories. The geometric paths are similar, but the robust profile
   maintains lower speeds throughout.}
   \label{fig:nom_vs_rob}
 \end{figure}
 
-\subsection{\new{Battery Sizing}}\label{subsec:sizing_results}
+\subsection{Battery Sizing}\label{subsec:sizing_results}
 
-\new{Figure~\ref{fig:battery_sizing} presents the battery sizing sweep for the Grand Prix circuit. The left panel shows the energy balance as a function of battery capacity $Q_{\rm batt}$. Below a critical threshold $Q^* \approx 37$\,kWh, the required energy exceeds the available capacity and the mission becomes infeasible. Above this limit, a growing safety margin appears, with a final state of charge remaining above the minimum constraint (5\%).
+Figure~\ref{fig:battery_sizing} presents the battery sizing sweep for the Grand Prix circuit (Appendix~\ref{app:circuits}). The left panel shows the energy balance as a function of battery capacity $Q_{\rm batt}$. Below a critical threshold $Q^* \approx 37$\,kWh, the required energy exceeds the available capacity and the mission becomes infeasible. Above this limit, a growing safety margin appears, with a final state of charge remaining above the minimum constraint (5\%).
 
-At the feasibility boundary, the vehicle operates at the limit of its energy budget, with a mass of approximately 824\,kg and a final state of charge around 7\%. Slight undersizing leads to mission failure, while oversizing introduces increasing dead weight with limited performance benefit. This sharp transition highlights a strongly nonlinear feasibility boundary driven by the coupling between mass and energy consumption.}
+At the feasibility boundary, the vehicle operates at the limit of its energy budget, with a mass of approximately 824\,kg and a final state of charge around 7\%. Slight undersizing leads to mission failure, while oversizing introduces increasing dead weight with limited performance benefit. This sharp transition highlights a strongly nonlinear feasibility boundary driven by the coupling between mass and energy consumption.
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=0.7\linewidth]{battery_sizing_report.png}
-  \caption{\new{Battery sizing sweep. Left: required vs. available energy as a function of battery capacity, identifying the feasibility threshold $Q^* \approx 37$\,kWh. Right: final state of charge at race end, showing a sharp transition between infeasible ($\mathrm{SoC} \leq 0$) and feasible regimes.}}
+  \includegraphics[width=0.42\linewidth]{battery_sizing_report.png}
+  \caption{Battery sizing sweep. Left: required vs. available energy as a function of battery capacity, identifying the feasibility threshold $Q^* \approx 37$\,kWh. Right: final state of charge at race end, showing a sharp transition between infeasible ($\mathrm{SoC} \leq 0$) and feasible regimes.}
   \label{fig:battery_sizing}
 \end{figure}
 
 \FloatBarrier
 
-\subsection{\new{Race Strategy, Battery Reduction, and Circuit Comparison}}
+\subsection{Race Strategy, Battery Reduction, and Circuit Comparison}
 
-\new{Figure~\ref{fig:race_strategy} summarizes the joint optimization of race strategy and circuit characteristics. The left panel shows the time--energy Pareto front obtained by varying the grip fraction $g \in [0.50, 0.90]$. The fastest configuration ($g = 0.90$) maximizes energy consumption (677\,Wh/lap), while moderate pace relaxation within a $\sim 15\%$ time penalty yields up to $\sim 8\%$ reduction in energy use.}
+Figure~\ref{fig:race_strategy} summarizes the joint optimization of race strategy and circuit characteristics. The left panel shows the time--energy Pareto front obtained by varying the grip fraction $g \in [0.50, 0.90]$. The fastest configuration ($g = 0.90$) maximizes energy consumption (677\,Wh/lap), while moderate pace relaxation within a $\sim 15\%$ time penalty yields up to $\sim 8\%$ reduction in energy use.
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\linewidth]{race_strategy_report.png}
-  \caption{\new{Race strategy and circuit comparison. Left: time--energy Pareto front. Middle: optimal pace law showing how strategic pacing reduces the required battery capacity. Right: comparison of circuits in terms of mean energy per lap and resulting battery sizing requirements.}}
+  \includegraphics[width=0.65\linewidth]{race_strategy_report.png}
+  \caption{Race strategy and circuit comparison. Left: time--energy Pareto front. Middle: optimal pace law showing how strategic pacing reduces the required battery capacity. Right: comparison of circuits in terms of mean energy per lap and resulting battery sizing requirements.}
   \label{fig:race_strategy}
 \end{figure}
 
-\new{The middle panel illustrates the optimal pacing strategy as a function of battery capacity. Allowing pace modulation reduces the minimum feasible battery size from 37 to 25\,kWh, corresponding to a ~32\% reduction and approximately 60\,kg of mass savings. The solution structure matches the constant $(g^*, p^*)$ regime predicted by the KKT conditions, confirming the optimality of the numerical solution.
+The middle panel illustrates the optimal pacing strategy as a function of battery capacity. Allowing pace modulation reduces the minimum feasible battery size from 37 to 25\,kWh, corresponding to a ~32\% reduction and approximately 60\,kg of mass savings. The solution structure matches the constant $(g^*, p^*)$ regime predicted by the KKT conditions, confirming the optimality of the numerical solution.
 
-The right panel compares different circuit layouts over a fixed $\sim 65$\,km race distance. The Grand Prix circuit requires approximately 670\,Wh/lap and a battery size of 37\,kWh (total weight of 824\,kg). The Monza-style circuit is the most efficient at 517\,Wh/lap, reducing the required battery to 32\,kWh (798\,kg), a 23\% improvement relative to the baseline. The Hairpin circuit lies in between at 578\,Wh/lap and 32\,kWh. Overall, circuit geometry is a dominant driver of energy demand and therefore battery sizing.}
+The right panel compares different circuit layouts over a fixed $\sim 65$\,km race distance. The Grand Prix circuit requires approximately 670\,Wh/lap and a battery size of 37\,kWh (total weight of 824\,kg). The Monza-style circuit is the most efficient at 517\,Wh/lap, reducing the required battery to 32\,kWh (798\,kg), a 23\% improvement relative to the baseline. The Hairpin circuit lies in between at 578\,Wh/lap and 32\,kWh. Overall, circuit geometry is a dominant driver of energy demand and therefore battery sizing.
 
 \section{Conclusion}
 % ─────────────────────────────────────────────────────────────────────────────
 
-\new{This work presented a five-stage hierarchical optimization framework for electric vehicle racing.}
-The SCP formulation efficiently solved the minimum-time problem while substantially reducing computational effort compared with a standard nonlinear optimization approach. Multi-objective optimization revealed clear trade-offs between lap time, energy consumption, and robustness to grip uncertainty, showing that modest increases in lap time can enable significant energy savings while reducing sensitivity to adverse conditions.
+This work presented a five-stage hierarchical optimization framework for electric vehicle racing.
+The SCP formulation efficiently solved the minimum-time problem while substantially reducing
+computational effort compared with a standard nonlinear optimization approach. Multi-objective
+optimization revealed clear trade-offs between lap time, energy consumption, and robustness to
+grip uncertainty, showing that modest increases in lap time can enable significant energy savings
+while reducing sensitivity to adverse conditions.
 
-\new{Battery sizing and race strategy optimization further demonstrated that jointly optimizing racing line aggressiveness and pace can substantially reduce energy requirements. In the Grand Prix case considered, co-optimization reduced the required battery capacity by about 32\%, corresponding to roughly 60\,kg of mass savings, while maintaining competitive performance. Across the circuits considered, optimal battery size remained strongly influenced by track geometry and curvature.}
+Battery sizing and race strategy optimization further demonstrated that jointly optimizing racing
+line aggressiveness and pace can substantially reduce energy requirements. In the Grand Prix case
+(Appendix~\ref{app:circuits}) considered, co-optimization reduced the required battery capacity by
+about 32\%, corresponding to roughly 60\,kg of mass savings, while maintaining competitive
+performance. Across the circuits considered, optimal battery size remained strongly influenced by
+track geometry and curvature.
 
-A key limitation of the present framework lies in the separation between kinematic optimality and dynamic feasibility, as the simplified vehicle model neglects effects such as tire slip and yaw dynamics.
+A key limitation of the present framework lies in the separation between kinematic optimality,
+where we consider cars as point masses, and dynamic feasibility, where we use a bicycle model with
+yaw dynamics. Hence the pre-computed optimal times and energy budgets from the kinematic model are
+approximate, and the actual closed-loop performance depends on the controller's ability to track
+the reference trajectory.
 
-\new{To balance fidelity and tractability, a two-level modeling hierarchy was adopted: a kinematic formulation for trajectory optimization and a mass-coupled model for battery sizing and strategy optimization. This decomposition enables efficient computation while preserving the dominant physical trade-offs.}
+To balance fidelity and tractability, a two-level modeling hierarchy was adopted with a kinematic
+formulation for trajectory optimization and a mass-coupled model for battery sizing and strategy
+optimization. This decomposition enables efficient computation while preserving the dominant
+physical trade-offs.
 
-\new{Future work could focus on integrating these modeling levels into a unified formulation, reducing conservatism through chance-constrained approaches, relaxing the symmetric-race assumption in the KKT-based strategy formulation, and incorporating additional race effects such as tire degradation or race interruptions.}
+Future work could focus on integrating these modeling levels into a unified formulation, reducing
+conservatism through chance-constrained approaches, and relaxing the symmetric-race assumption in
+the KKT-based strategy formulation since the car does not necessarily follow the exact same
+trajectory at every lap in real-world races. Additional race effects such as tire degradation or
+race interruptions could also be incorporated, including pit stops for tire changes, battery
+thermal management, or adapting to changing weather conditions.
 
 \section*{Contributions}
 
 Erwin Poussi developed the simulator, the SCP algorithm with Simplex and the scipy SLSQP pipeline,
-the iLQR trajectory tracking controller, the race simulation engine, and the stochastic
-optimization formulation. \new{Matthieu Hautsch implemented the time--energy Pareto front analysis,
-the energy consumption model, the battery sizing sweep, and the race strategy
-co-optimization including the KKT analytical solution, the NLP validation, and the multi-circuit
-comparison.} Code available at \url{https://github.com/Rwin2/EV-optimal-line-racing}.
+the single-lap time-energy Pareto front computation and sweep strategy, the race simulation
+environment (rendering, vehicle dynamics, battery discharge physics and discretization), the
+stochastic optimization formulation, and the TV-LQR trajectory tracking controller. Matthieu
+Hautsch implemented the multi-lap time--energy Pareto front analysis, the battery sizing sweep,
+and the race strategy co-optimization including the KKT analytical solution, the NLP validation,
+and the multi-circuit comparison. Code available at
+\url{https://github.com/Rwin2/EV-optimal-line-racing}.
 
 \bibliography{references}
 
@@ -444,7 +473,7 @@ $g$ & 9.81\,m/s$^2$ & Gravitational acceleration \\
 \begin{table}[h!]
 \centering
 \small
-\new{%
+%
 \begin{tabular}{lll}
 \toprule
 Symbol & Value & Description \\
@@ -460,8 +489,8 @@ $\mathrm{SoC}_{\min}$ & 0.05 & Minimum allowed state of charge \\
 $p_{\min}$ & 0.80 & Minimum pace factor (strategy) \\
 \bottomrule
 \end{tabular}
-\caption{\new{Vehicle parameters for Stages 4--5 (battery sizing and race strategy), based on Formula~E Gen3 regulations.}}
-}
+\caption{Vehicle parameters for Stages 4--5 (battery sizing and race strategy), based on Formula~E Gen3 regulations.}
+
 \end{table}
 
 \section{Bicycle Model Dynamics}\label{app:dynamics}
@@ -528,6 +557,41 @@ with terminal condition $P_N = Q$. The weight matrices are
 $Q = \text{diag}(5,\, 5,\, 10,\, 1,\, 0.5,\, 0.5)$ and $R = \text{diag}(10,\, 10^{-5})$,
 penalizing position and heading errors more heavily than lateral velocity, while keeping steering
 effort smooth.
+
+\section{Stanley + TV-LQR Controller Algorithm}\label{app:controller_algo}
+
+The online controller combines a Stanley lateral controller with TV-LQR feedback gains precomputed
+offline. Algorithm~\ref{alg:controller} summarizes the procedure.
+
+\begin{figure}[htbp]
+\small
+\begin{enumerate}[leftmargin=*,label=\textbf{\arabic*.}]
+  \item \textbf{Offline (reference generation):}
+  \begin{enumerate}[label=(\alph*)]
+    \item Simulate the bicycle model tracking the optimized raceline with a Stanley controller
+          to produce a dynamically feasible reference $(\bar{\mathbf{s}}_k, \bar{\mathbf{u}}_k)$.
+    \item Linearize dynamics at each reference point via finite differences of the RK4 integrator
+          to obtain $A_k$, $B_k$.
+    \item Solve the discrete Riccati equation backward~\eqref{eq:Kgain}--\eqref{eq:riccati}
+          to obtain TV-LQR gains $K_k$.
+  \end{enumerate}
+  \item \textbf{Online (at each time step):}
+  \begin{enumerate}[label=(\alph*)]
+    \item Find the nearest reference point using spatial indexing (closest point on the raceline).
+    \item Compute the Stanley steering command $\delta_{\rm stanley}$ from cross-track error and
+          heading error.
+    \item Compute the LQR correction
+          $\Delta \mathbf{u} = K_k (\mathbf{s} - \bar{\mathbf{s}}_k)$, scaled by a blending factor
+          that decreases with position error.
+    \item Apply the combined control
+          $\delta = \delta_{\rm stanley} + 0.15\,\Delta\delta_{\rm lqr}$, \;
+          $F_{\rm drive} = \bar{F}_k + \Delta F_{\rm lqr}$.
+    \item Enforce grip margin (95\% of friction limit) and power constraints.
+  \end{enumerate}
+\end{enumerate}
+\captionof{figure}{Stanley + TV-LQR trajectory tracking algorithm.}
+\label{alg:controller}
+\end{figure}
 
 \section{Test Circuits}\label{app:circuits}
 

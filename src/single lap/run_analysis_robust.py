@@ -26,7 +26,7 @@ from car import CarParams
 from optimizer import (alpha_to_raceline, compute_curvature_from_path,
                        compute_velocity_profile, compute_energy)
 
-TRACK = "monaco"
+TRACK = "monza"
 N_STATIONS = 40
 N_PARETO = 10
 N_MC = 20           # Monte Carlo samples for SAA
@@ -444,22 +444,23 @@ def main():
     print("[5] Generating figures...")
     alpha_rob_w0 = rob_results[0][4]  # robust raceline at w=0 (pure time)
     v_rob_w0 = rob_results[0][3]      # robust speed profile at w=0
+    tag = TRACK  # include track name in filenames
     plot_raceline(trk, alpha_opt, alpha_rob_w0, centerline, normals,
-                  os.path.join(FIG_DIR, 'raceline_nom_vs_robust.png'))
-    print(f"    Saved: raceline_nom_vs_robust.png")
+                  os.path.join(FIG_DIR, f'raceline_nom_vs_robust_{tag}.png'))
+    print(f"    Saved: raceline_nom_vs_robust_{tag}.png")
 
     plot_pareto_comparison(nom_results, rob_results,
-                           os.path.join(FIG_DIR, 'pareto_nominal_vs_robust.png'))
-    print(f"    Saved: pareto_nominal_vs_robust.png")
+                           os.path.join(FIG_DIR, f'pareto_nominal_vs_robust_{tag}.png'))
+    print(f"    Saved: pareto_nominal_vs_robust_{tag}.png")
 
     plot_speed_profiles(nom_results, rob_results, ds_opt,
-                        os.path.join(FIG_DIR, 'speed_profiles_nom_vs_robust.png'))
-    print(f"    Saved: speed_profiles_nom_vs_robust.png")
+                        os.path.join(FIG_DIR, f'speed_profiles_nom_vs_robust_{tag}.png'))
+    print(f"    Saved: speed_profiles_nom_vs_robust_{tag}.png")
 
     # ── 6. Save results for simulation ──
     cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache")
     os.makedirs(cache_dir, exist_ok=True)
-    np.savez(os.path.join(cache_dir, 'optimization_results.npz'),
+    np.savez(os.path.join(cache_dir, f'optimization_results_{tag}.npz'),
              centerline=centerline, normals=normals, widths=widths,
              alpha_nom=alpha_opt, v_nom=v_opt,
              alpha_rob=alpha_rob_w0, v_rob=v_rob_w0,
