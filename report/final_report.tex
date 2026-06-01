@@ -32,7 +32,7 @@ We present a five-stage hierarchical framework: (1)~time-optimal racing line com
 custom Sequential Convex Programming (SCP) algorithm with a hand-coded Simplex solver;
 (2)~Pareto-front analysis of the lap-time/energy tradeoff; (3)~sampled worst-case robustification
 under uncertain grip; (4)~battery sizing for multi-lap races under mass-energy coupling; and
-(5)~race strategy co-optimization with a closed-form KKT solution for line choice and pace
+(5)~race strategy co-optimization with a closed-form Karush-Kuhn-Tucker (KKT) solution for line choice and pace
 management.
 SCP converges 12$\times$ faster than SLSQP while reaching a comparable solution.
 Grip uncertainty imposes a $\sim$3\,s lap-time penalty at the time-optimal operating point, a cost
@@ -369,7 +369,7 @@ At the feasibility boundary, the vehicle operates at the limit of its energy bud
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\linewidth]{race_strategy_report.png}
-  \caption{\new{Race strategy and circuit comparison. Left: time--energy Pareto front. Middle: optimal pace law showing how strategic pacing reduces the required battery capacity from 37 to 25\,kWh ($\approx$60\,kg mass saving). Right: comparison of circuits in terms of mean energy per lap and resulting battery sizing requirements.}}
+  \caption{\new{Race strategy and circuit comparison. Left: time--energy Pareto front. Middle: optimal pace law showing how strategic pacing reduces the required battery capacity. Right: comparison of circuits in terms of mean energy per lap and resulting battery sizing requirements.}}
   \label{fig:race_strategy}
 \end{figure}
 
@@ -381,28 +381,15 @@ The right panel compares different circuit layouts over a fixed $\sim 65$\,km ra
 % ─────────────────────────────────────────────────────────────────────────────
 
 \new{This work presented a five-stage hierarchical optimization framework for electric vehicle racing.}
-The SCP formulation efficiently solved the minimum-time problem, requiring significantly fewer iterations
-than a standard SLSQP approach (15 vs.\ $\sim$180 on the Monza-style circuit). Multi-objective optimization
-then revealed a clear time--energy trade-off, where modest increases in lap time enable substantial energy savings.
-The robust worst-case formulation introduced a 3\,s penalty at the time-optimal point on the Monaco circuit,
-with this gap diminishing at more energy-efficient operating points.
+The SCP formulation efficiently solved the minimum-time problem while substantially reducing computational effort compared with a standard nonlinear optimization approach. Multi-objective optimization revealed clear trade-offs between lap time, energy consumption, and robustness to grip uncertainty, showing that modest increases in lap time can enable significant energy savings while reducing sensitivity to adverse conditions.
 
-\new{Battery sizing analysis shows that a 37\,kWh pack is required to complete the 51-lap Grand Prix race at full performance.
-Co-optimization of race strategy and energy management reduces this requirement to 25\,kWh, corresponding to a 32\% reduction
-and approximately 60\,kg of mass savings. This improvement is achieved by exploiting the closed-form KKT structure that jointly
-optimizes racing line and pace factor. Across the three circuits considered over a $\sim$65\,km race distance, optimal battery
-capacity ranges from 32 to 37\,kWh, primarily driven by differences in curvature and their impact on energy consumption.}
+\new{Battery sizing and race strategy optimization further demonstrated that jointly optimizing racing line aggressiveness and pace can substantially reduce energy requirements. In the Grand Prix case considered, co-optimization reduced the required battery capacity by about 32\%, corresponding to roughly 60\,kg of mass savings, while maintaining competitive performance. Across the circuits considered, optimal battery size remained strongly influenced by track geometry and curvature.}
 
-A key limitation of the present framework lies in the separation between kinematic optimality and dynamic feasibility.
-The kinematic model tends to overestimate cornering performance by neglecting tire slip and yaw inertia effects.
+A key limitation of the present framework lies in the separation between kinematic optimality and dynamic feasibility, as the simplified vehicle model neglects effects such as tire slip and yaw dynamics.
 
-\new{To manage computational complexity, a two-level modeling hierarchy is adopted: a fixed-mass kinematic model is used for
-trajectory optimization (Stages 1--3), while a mass-coupled model is used for battery sizing and strategy optimization (Stages 4--5).
-This separation ensures that each stage operates at an appropriate level of fidelity without requiring full joint optimization.}
+\new{To balance fidelity and tractability, a two-level modeling hierarchy was adopted: a kinematic formulation for trajectory optimization and a mass-coupled model for battery sizing and strategy optimization. This decomposition enables efficient computation while preserving the dominant physical trade-offs.}
 
-Future work could focus on integrating these two levels into a unified formulation, developing chance-constrained approaches
-to reduce conservatism, relaxing the symmetric-race assumption in the KKT-based strategy via sequential or dynamic programming
-methods, and extending the model to account for tire degradation and race interruptions such as safety-car periods.
+\new{Future work could focus on integrating these modeling levels into a unified formulation, reducing conservatism through chance-constrained approaches, relaxing the symmetric-race assumption in the KKT-based strategy formulation, and incorporating additional race effects such as tire degradation or race interruptions.}
 
 \section*{Contributions}
 
