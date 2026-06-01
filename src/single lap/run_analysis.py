@@ -20,7 +20,7 @@ from car import CarParams
 from optimizer import (alpha_to_raceline, compute_curvature_from_path,
                        compute_velocity_profile, solve_scp)
 
-TRACK = "monaco"
+TRACK = "monza"
 N_STATIONS = 80   # SCP working resolution
 FIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "figures")
 os.makedirs(FIG_DIR, exist_ok=True)
@@ -55,7 +55,7 @@ def run_vanilla_scp(trk):
     kappa = compute_curvature_from_path(rl)
     ds = np.linalg.norm(np.diff(rl, axis=0, append=rl[0:1]), axis=1)
 
-    return alpha, v, hist, rl, kappa, ds, centerline, normals, widths, car
+    return alpha, v, hist, rl, kappa, ds, centerline, normals, widths, car, alpha0
 
 
 def run_scipy_comparison(centerline, normals, widths, car, alpha0_scp):
@@ -72,9 +72,14 @@ def run_scipy_comparison(centerline, normals, widths, car, alpha0_scp):
         v = x[n:]
         path = alpha_to_raceline(alpha, centerline, normals)
         ds = np.linalg.norm(np.diff(path, axis=0, append=path[0:1]), axis=1)
-        T = np.sum(ds / np.maximum(v, 0.5))
-        history_scipy.append(T)
-        return T
+        return float(np.sum(ds / np.maximum(v, 0.5)))
+
+    def scipy_iter_callback(x):
+        alpha = x[:n]
+        v = x[n:]
+        path = alpha_to_raceline(alpha, centerline, normals)
+        ds = np.linalg.norm(np.diff(path, axis=0, append=path[0:1]), axis=1)
+        history_scipy.append(float(np.sum(ds / np.maximum(v, 0.5))))
 
     v0 = compute_velocity_profile(
         alpha_to_raceline(alpha0_scp, centerline, normals),
@@ -119,7 +124,7 @@ def run_scipy_comparison(centerline, normals, widths, car, alpha0_scp):
 
     t0 = time.time()
     res = scipy_minimize(joint_time_obj, x0, method='SLSQP', bounds=bounds_all,
-                         constraints=constraints,
+                         constraints=constraints, callback=scipy_iter_callback,
                          options={'maxiter': 200, 'ftol': 1e-10, 'disp': True})
     dt = time.time() - t0
     print(f"  scipy SLSQP: J={res.fun:.2f}s  iters={res.nit}  time={dt:.1f}s  success={res.success}")
@@ -134,14 +139,11 @@ def plot_convergence(scp_hist, scipy_hist, save_path):
     ax.plot(range(len(scp_hist)), scp_hist, 'o-', color='#d62728', lw=2, ms=6,
             label=f'SCP + Simplex (final: {scp_hist[-1]:.2f}s)')
 
-    n_scipy = len(scipy_hist)
-    if n_scipy > 0:
-        step = max(1, n_scipy // 50)
-        idx = list(range(0, n_scipy, step))
-        ax.plot(idx, [scipy_hist[i] for i in idx], 's-', color='#1f77b4', lw=2, ms=4,
+    if len(scipy_hist) > 0:
+        ax.plot(range(len(scipy_hist)), scipy_hist, 's-', color='#1f77b4', lw=2, ms=4,
                 label=f'scipy SLSQP (final: {scipy_hist[-1]:.2f}s)')
 
-    ax.set_xlabel('Iteration / Function evaluation', fontweight='bold')
+    ax.set_xlabel('Iteration', fontweight='bold')
     ax.set_ylabel(f'Objective J ({N_STATIONS}-pt discretization, s)', fontweight='bold')
     ax.set_title(f'Convergence Comparison — {TRACK.capitalize()} Circuit', fontweight='bold')
     ax.legend(fontsize=10)
@@ -160,8 +162,8 @@ def main():
     trk = get_track(TRACK)
     print(f"Track: {trk.name} | {trk.length:.0f}m | {len(trk.centerline)} pts\n")
 
-    alpha, v, hist, rl, kappa, ds, cl, normals, widths, car = run_vanilla_scp(trk)
-    scipy_hist, scipy_res = run_scipy_comparison(cl, normals, widths, car, alpha)
+    alpha, v, hist, rl, kappa, ds, cl, normals, widths, car, alpha0 = run_vanilla_scp(trk)
+    scipy_hist, scipy_res = run_scipy_comparison(cl, normals, widths, car, alpha0)
 
     print("\n[3] Generating figures...")
     plot_convergence(hist, scipy_hist, os.path.join(FIG_DIR, 'convergence_scp_vs_scipy.png'))
