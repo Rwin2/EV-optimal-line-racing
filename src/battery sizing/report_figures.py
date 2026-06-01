@@ -116,6 +116,30 @@ def fig_battery_sizing(track_name='complex', n_laps=51):
 # Figure 2 — Race Strategy
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _load_circuit_records():
+    CIRCUITS = [
+        ('complex', 'Grand Prix',  '#e74c3c', 'race_51laps.json'),
+        ('monza',   'Monza-Style', '#3498db', 'race_58laps.json'),
+        ('hairpin', 'Hairpin',     '#2ecc71', 'race_51laps.json'),
+    ]
+    records = []
+    for name, label, color, fname in CIRCUITS:
+        path = os.path.join(PROJ_ROOT, 'figures', name, fname)
+        if not os.path.exists(path):
+            print(f"  WARNING: {path} not found — skipping")
+            continue
+        with open(path) as f:
+            d = json.load(f)
+        records.append({
+            'label':     label,
+            'color':     color,
+            'energy_wh': np.array(d['lap_energy_Wh']),
+            'Q_kWh':     d['Q_batt_kWh'],
+            'mass_kg':   d['mass_kg'],
+        })
+    return records
+
+
 def fig_race_strategy(racing_line, Q_kWh=36.9, n_laps=51,
                        T_max_pct=15.0, p_min=0.80):
     print(f"\n[2/3] Race strategy  (Q={Q_kWh} kWh, {n_laps} laps, "
@@ -139,8 +163,10 @@ def fig_race_strategy(racing_line, Q_kWh=36.9, n_laps=51,
     Qn    = float(Q_sw[fno ].min()) if fno.any()  else None
     Qs    = float(Q_sw[fstr].min()) if fstr.any() else None
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    fig.subplots_adjust(wspace=0.34)
+    circuit_records = _load_circuit_records()
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig.subplots_adjust(wspace=0.36)
 
     # ── Left: Pareto T vs E ──────────────────────────────────────────────
     ax = axes[0]
@@ -167,7 +193,7 @@ def fig_race_strategy(racing_line, Q_kWh=36.9, n_laps=51,
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.tick_params(labelsize=FS_TK)
 
-    # ── Right: p*(Q) and Q* reduction ────────────────────────────────────
+    # ── Middle: p*(Q) and Q* reduction ───────────────────────────────────
     ax = axes[1]
     p_plot = np.clip(p_unc, 0.0, 1.35)
     ax.plot(Q_sw, p_plot, 'o-', color=C_STRAT, ms=4, lw=2, label='$p^*(Q)$')
@@ -192,6 +218,28 @@ def fig_race_strategy(racing_line, Q_kWh=36.9, n_laps=51,
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.tick_params(labelsize=FS_TK)
     ax.set_ylim(max(0.0, float(p_plot.min()) - 0.05), 1.42)
+
+    # ── Right: energy consumption by circuit ─────────────────────────────
+    ax = axes[2]
+    if circuit_records:
+        xs     = np.arange(len(circuit_records))
+        means  = [np.mean(r['energy_wh']) for r in circuit_records]
+        colors = [r['color']              for r in circuit_records]
+        labels = [r['label']              for r in circuit_records]
+        bars   = ax.bar(xs, means, color=colors, alpha=0.85,
+                        edgecolor='white', linewidth=1.2, width=0.5)
+        for bar, r, m in zip(bars, circuit_records, means):
+            ax.text(bar.get_x() + bar.get_width() / 2.0,
+                    bar.get_height() + 5.0,
+                    f'{m:.0f} Wh\n$Q^*={r["Q_kWh"]:.0f}$ kWh\n{r["mass_kg"]:.0f} kg',
+                    ha='center', va='bottom', fontsize=8.5, linespacing=1.4)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, fontsize=FS_TK)
+        ax.set_ylim(0, max(means) * 1.32)
+    ax.set_ylabel('Mean net energy per lap (Wh)', fontsize=FS_AX)
+    ax.set_title('Energy consumption by circuit',  fontsize=FS_TI, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+    ax.tick_params(labelsize=FS_TK)
 
     out = os.path.join(FIG_DIR, 'race_strategy_report.png')
     fig.savefig(out, dpi=150, bbox_inches='tight')
