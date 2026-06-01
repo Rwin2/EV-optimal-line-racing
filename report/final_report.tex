@@ -38,7 +38,7 @@ SCP converges 12$\times$ faster than SLSQP while reaching a comparable solution.
 Grip uncertainty imposes a $\sim$3\,s lap-time penalty at the time-optimal operating point, a cost
 that diminishes as energy efficiency is prioritized.
 Pace management reduces the minimum feasible battery capacity by 32\% through a
-closed-form KKT strategy under symmetric-race assumptions.%
+closed-form KKT strategy, assuming identical conditions across all laps.%
 }
 \end{abstract}
 
@@ -167,7 +167,7 @@ constraint violations, grown by a factor of 1.2 when the step improves the objec
 the SCP solution, we solve the same problem with scipy's SLSQP. \new{On the Monza-style circuit (80
 stations, 1115\,m), SCP converges from a curvature-minimizing warm start at 44.5\,s to 35.9\,s in
 15 iterations, while SLSQP requires approximately 180 iterations to reach 35.4\,s, consistent with
-both solvers converging toward a qualitatively similar optimum.}
+both solvers converging toward a similar optimum.}
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Time-Energy Pareto Optimization}
