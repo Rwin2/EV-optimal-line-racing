@@ -226,3 +226,67 @@ class ILQRController:
         F_drive = float(np.clip(u[1], -self.p.F_brake_max, self.p.F_drive_max))
 
         return delta, F_drive
+
+
+def generate_racing_line(track, mode='min_laptime'):
+    """
+    Generate a racing line for the given track.
+
+    Parameters
+    ----------
+    track : Track
+    mode  : 'min_laptime' — time-optimal line via SCP (default)
+            'center'      — track centerline
+
+    Returns
+    -------
+    racing_line : ndarray (N, 2)
+    v_profile   : ndarray (N,)
+    """
+    from scipy.optimize import minimize as scipy_minimize
+    from scipy.interpolate import interp1d
+    from scipy.ndimage import uniform_filter1d
+    from optimizer import (alpha_to_raceline, compute_curvature_from_path,
+                           compute_velocity_profile, solve_scp)
+    from car import CarParams
+
+    n_full = len(track.centerline)
+    car    = CarParams()
+
+    if mode == 'center':
+        racing_line = track.centerline.copy()
+        kappa = compute_curvature_from_path(racing_line)
+        ds    = np.linalg.norm(np.diff(racing_line, axis=0, append=racing_line[0:1]), axis=1)
+        v     = compute_velocity_profile(racing_line, kappa, car, ds)
+        return racing_line, v
+
+    # mode == 'min_laptime': SCP at reduced resolution, interpolated to full track
+    n_scp = min(80, n_full)
+    idx   = np.linspace(0, n_full - 1, n_scp, dtype=int)
+    c_sub = track.centerline[idx]
+    n_sub = track.normals[idx]
+    w_sub = track.widths[idx]
+
+    bounds = [(-w, w) for w in w_sub]
+    def curv_obj(a):
+        path = alpha_to_raceline(a, c_sub, n_sub)
+        k    = compute_curvature_from_path(path)
+        da   = np.diff(a, append=a[0])
+        return float(np.sum(k**2) + 1e-5 * np.sum(da**2))
+    res_w = scipy_minimize(curv_obj, np.zeros(n_scp), method='SLSQP',
+                           bounds=bounds, options={'maxiter': 2000, 'ftol': 1e-12, 'disp': False})
+
+    alpha, _, _ = solve_scp(c_sub, n_sub, w_sub, car, alpha0=res_w.x)
+
+    t_sub      = np.linspace(0, 1, n_scp)
+    t_full     = np.linspace(0, 1, n_full)
+    alpha_full = interp1d(t_sub, alpha, kind='cubic',
+                          fill_value='extrapolate')(t_full)
+    alpha_full = np.clip(alpha_full, -track.widths, track.widths)
+    alpha_full = uniform_filter1d(alpha_full, size=max(3, n_full // n_scp), mode='wrap')
+    racing_line = alpha_to_raceline(alpha_full, track.centerline, track.normals)
+
+    kappa = compute_curvature_from_path(racing_line)
+    ds    = np.linalg.norm(np.diff(racing_line, axis=0, append=racing_line[0:1]), axis=1)
+    v     = compute_velocity_profile(racing_line, kappa, car, ds)
+    return racing_line, v

@@ -38,7 +38,7 @@ EV-optimal-line-racing/
 │       └── compare_methods.py      # Pareto method comparison: grip proxy vs joint SCP
 ├── figures/                # Generated figures (per-circuit subfolders)
 ├── references/             # Course reader + papers
-├── report/                 # LaTeX (proposal, status update)
+├── report/                 # LaTeX — final conference paper
 └── races/                  # [untracked] Simulation outputs
 ```
 
@@ -183,16 +183,15 @@ Car model: m_chassis=640 kg, P_max=300 kW, parabolic η(P): peak 95% at 60% load
 | Hairpin & Chicane | `hairpin` | 1269 m | 51 | 64.7 km | 31.7 kWh | 798 kg | 63.2 s | 7.1% |
 | Sharp Corner Circuit | `monaco` | 903 m | 72 | 65.0 km | 38.3 kWh | 832 kg | 45.9 s | 8.4% |
 
-### Phase 4 — Race strategy co-optimization (Grand Prix Circuit, 50 laps)
+### Phase 4 — Race strategy co-optimization (Grand Prix Circuit, 51 laps)
 
 | Metric | Value |
 | --- | --- |
-| Pareto method | Joint SCP (α + v co-optimized per lap) |
-| T spread | 127% (38s → 86s), E spread 348% (111 → 497 Wh) |
+| Pareto method | Grip-fraction sweep (g ∈ [0.50, 0.90]) + KKT closed-form |
+| KKT analytical result | line\* = argmin T(g)·E(g), p\* = E\_budget/(n·E(line\*)) |
 | Mass coupling | E_base ∝ mass_new / mass_ref included in sweep |
-| Q* without strategy | 27.0 kWh |
-| Q* with pace strategy (p_min=0.80) | 5.0 kWh → **110 kg lighter** |
-| With competitive constraint T_max=+15% | ~8–11 kWh → ~80 kg lighter |
+| Q* without pace strategy | 37 kWh (824 kg, full effort) |
+| Q* with pace strategy (p_min=0.80, T_max=+15%) | 25 kWh → **60 kg lighter** |
 
 ### Cross-circuit comparison (`figures/comparison_circuits.png`)
 
