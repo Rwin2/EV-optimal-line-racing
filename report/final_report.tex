@@ -71,7 +71,8 @@ and strategy co-optimization.}
 multi-objective Pareto analysis, sampled worst-case robustification under uncertain grip,
 race-level battery sizing with mass-energy coupling, and closed-form KKT race strategy.
 Stages 1--3 use a fixed-mass kinematic model for trajectory optimization; Stages 4--5 switch to a
-mass-coupled battery model to capture the energy--mass coupling at race scale.}
+mass-coupled battery model to capture the energy--mass coupling at race scale.
+Experiments are conducted on four procedurally generated circuits (Appendix~\ref{app:circuits}).}
 The optimized trajectories are subsequently tracked using a dynamic bicycle model and a
 Time-Varying Linear Quadratic Regulator (TV-LQR) to evaluate feasibility in closed-loop
 simulation.
@@ -527,5 +528,18 @@ with terminal condition $P_N = Q$. The weight matrices are
 $Q = \text{diag}(5,\, 5,\, 10,\, 1,\, 0.5,\, 0.5)$ and $R = \text{diag}(10,\, 10^{-5})$,
 penalizing position and heading errors more heavily than lateral velocity, while keeping steering
 effort smooth.
+
+\section{Test Circuits}\label{app:circuits}
+
+All circuits are procedurally generated closed tracks; lap counts are chosen to normalize race
+distance to $\approx$65\,km. Figure~\ref{fig:circuits} shows their layouts.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{circuits_overview.png}
+  \caption{Track layouts. Red dashed line: centerline; green square: start/finish.
+  Each panel lists the circuit name, length, lap count for a $\approx$65\,km race, and key characteristics.}
+  \label{fig:circuits}
+\end{figure}
 
 \end{document}
