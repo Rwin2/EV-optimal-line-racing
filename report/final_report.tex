@@ -4,6 +4,7 @@
 \usepackage{enumitem}
 \usepackage{xcolor}
 \usepackage{url}
+\usepackage{placeins}
 \graphicspath{{../figures/}{../figures/report/}}
 
 \newcommand{\new}[1]{#1}
@@ -364,7 +365,7 @@ richer regeneration at higher masses. The sharp transition near $Q^*$ reflects t
 feasibility boundary arising from this mass-energy coupling: a slightly undersized pack fails the
 race, while a slightly oversized one carries unnecessary dead weight.}
 
-\begin{figure}[h!]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=0.7\linewidth]{battery_sizing_report.png}
   \caption{\new{Battery sizing sweep for the Grand Prix circuit (51 laps, $\approx$65\,km). Left:
@@ -374,7 +375,7 @@ race, while a slightly oversized one carries unnecessary dead weight.}
   \label{fig:battery_sizing}
 \end{figure}
 
-\clearpage
+\FloatBarrier
 \subsection{\new{Race Strategy, Battery Reduction, and Circuit Comparison}}
 
 \new{Figure~\ref{fig:race_strategy} summarizes the race strategy co-optimization and circuit
@@ -383,7 +384,7 @@ fraction $g \in [0.50, 0.90]$: the fastest line ($g = 0.90$, $T = 50.2$\,s) cons
 energy (677\,Wh/lap), while the slowest line within the competitive constraint
 ($T_{\max} = +15\%$) reduces energy by $\sim$8\%.}
 
-\begin{figure}[h!]
+\begin{figure}[htbp]
   \centering
   \includegraphics[width=\linewidth]{race_strategy_report.png}
   \caption{\new{Race strategy and circuit comparison. Left: time--energy Pareto front; the fastest
