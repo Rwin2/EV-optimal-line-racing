@@ -193,7 +193,7 @@ def _jax_curvature_jacobian(alpha, centerline, normals):
 
 
 def solve_scp(centerline, normals, widths, car_params, alpha0=None,
-              rho=3.0, eps=1e-2, max_iters=10):
+              rho=3.0, eps=1e-2, max_iters=10, step_callback=None):
     """
     Joint path+speed optimization via Sequential Convex Programming.
 
@@ -234,6 +234,8 @@ def solve_scp(centerline, normals, widths, car_params, alpha0=None,
 
         J = np.sum(ds / np.maximum(v, 1e-3))
         history.append(J)
+        if step_callback is not None:
+            step_callback(it, alpha, v)
         dJ = abs(J_prev - J)
         print(f"    [SCP] iter {it:2d}: J={J:.4f}  dJ={dJ:.5f}")
         if it > 0 and dJ < eps:
