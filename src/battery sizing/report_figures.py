@@ -197,15 +197,12 @@ def fig_race_strategy(racing_line, Q_kWh=36.9, n_laps=51,
     ax = axes[1]
     p_plot = np.clip(p_unc, 0.0, 1.35)
     ax.plot(Q_sw, p_plot, 'o-', color=C_STRAT, ms=4, lw=2, label='$p^*(Q)$')
-    ax.axhline(1.0,   color='black', ls='-',  lw=1.2, label='Full pace ($p=1$)')
-    ax.axhline(p_min, color='grey',  ls=':',  lw=1.6,
-               label=f'$p_{{\\rm min}}={p_min:.2f}$')
+    ax.axhline(1.0,   color='black', ls='-',  lw=1.2)
+    ax.axhline(p_min, color='grey',  ls=':',  lw=1.6)
     if Qn:
-        ax.axvline(Qn, color=C_BAD,   ls='--', lw=2.0,
-                   label=f'$Q^*$ no strategy = {Qn:.0f} kWh')
+        ax.axvline(Qn, color=C_BAD,   ls='--', lw=2.0, label='$Q^*$ no strategy')
     if Qs:
-        ax.axvline(Qs, color=C_STRAT, ls='--', lw=2.0,
-                   label=f'$Q^*$ with strategy = {Qs:.0f} kWh')
+        ax.axvline(Qs, color=C_STRAT, ls='--', lw=2.0, label='$Q^*$ with strategy')
     ax.fill_between(Q_sw, 0, p_plot, where=p_unc >= 1.0,
                     alpha=0.08, color='green')
     ax.fill_between(Q_sw, 0, p_plot,
